@@ -1,0 +1,23 @@
+# SAM CLI deployment configuration.
+# Run `sam deploy --guided` once to auto-populate these values,
+# or fill them in manually and run `make deploy`.
+
+version = 0.1
+
+[default.global.parameters]
+stack_name     = "intentweave"
+region         = "us-east-1"
+confirm_changeset = true
+capabilities   = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+
+[default.build.parameters]
+use_container = false           # set true if you need a Docker build environment
+
+[default.deploy.parameters]
+stack_name            = "intentweave"
+s3_prefix             = "intentweave"
+region                = "us-east-1"
+resolve_s3            = true    # SAM auto-creates a managed S3 bucket for artifacts
+confirm_changeset     = true
+capabilities          = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+parameter_overrides   = "StackEnv=prod SessionTtlDays=7 LambdaMemoryMB=256 LogRetentionDays=14"

@@ -1,0 +1,190 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+# ---------------------------------------------------------------------------
+# IntentWeave — cost-per-query serverless deployment
+#
+# Architecture:
+#   API Gateway HTTP API (v2)  →  Lambda  →  DynamoDB (on-demand)
+#
+# Cost model (all resources bill per-request; zero idle cost):
+#   DynamoDB  PAY_PER_REQUEST  ~$0.00000125 per query (1 RCU + 1 WCU)
+#   Lambda    128 MB / ~200ms  ~$0.00000042 per query
+#   HTTP API                   ~$0.000001   per query
+#   ─────────────────────────────────────────────────
+#   Total                      < $0.000002  per query  (< $2 / million)
+# ---------------------------------------------------------------------------
+
+Description: >
+  IntentWeave deterministic orchestration engine.
+  Lambda + DynamoDB on-demand — pays only per query, zero idle cost.
+
+Parameters:
+  StackEnv:
+    Type: String
+    Default: prod
+    AllowedValues: [prod, staging, dev]
+    Description: Deployment environment label.
+
+  SessionTtlDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 365
+    Description: Days before an idle session is automatically removed by DynamoDB TTL.
+
+  LambdaMemoryMB:
+    Type: Number
+    Default: 256
+    AllowedValues: [128, 256, 512]
+    Description: Lambda memory allocation. 256 MB is the sweet spot for this workload.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [7, 14, 30, 60, 90]
+    Description: CloudWatch Logs retention period.
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 29          # 1 s below API GW hard limit
+    MemorySize: !Ref LambdaMemoryMB
+    Environment:
+      Variables:
+        SESSIONS_TABLE_NAME: !Ref SessionsTable
+        SESSION_TTL_DAYS: !Ref SessionTtlDays
+        POWERTOOLS_SERVICE_NAME: IntentWeave
+        LOG_LEVEL: INFO
+
+Resources:
+
+  # ─── DynamoDB ──────────────────────────────────────────────────────────────
+
+  SessionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain          # protect session state on stack deletion
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${AWS::StackName}-${StackEnv}-sessions"
+      # PAY_PER_REQUEST = on-demand; no capacity planning, no idle cost
+      BillingMode: PAY_PER_REQUEST
+      # STANDARD_INFREQUENT_ACCESS cuts storage cost by ~60 % for workloads
+      # with infrequent reads — fits a session store well.
+      TableClass: STANDARD_INFREQUENT_ACCESS
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: session_id
+          KeyType: HASH
+      # TTL: DynamoDB silently removes expired sessions at no charge
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      # PITR enables point-in-time restore (for disaster recovery)
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true             # AES-256 encryption at rest (free)
+
+  # ─── IAM ───────────────────────────────────────────────────────────────────
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-${StackEnv}-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Grants CloudWatch Logs write access only (minimal blast radius)
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBSessionAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: SessionTableReadWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                Resource: !GetAtt SessionsTable.Arn
+
+  # ─── Lambda ────────────────────────────────────────────────────────────────
+
+  IntentWeaveFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-${StackEnv}-handler"
+      CodeUri: .                     # SAM packages everything in the project root
+      Handler: lambda_handler.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Description: "IntentWeave deterministic orchestration handler"
+      # Prevent runaway concurrency from hammering downstream APIs
+      ReservedConcurrentExecutions: 100
+      Events:
+        PostMessage:
+          Type: HttpApi
+          Properties:
+            Path: /message
+            Method: POST
+            ApiId: !Ref HttpApi
+
+  # ─── API Gateway HTTP API (v2) ─────────────────────────────────────────────
+  #
+  # HTTP API is ~70 % cheaper than REST API and has lower latency.
+  # $1.00 per million requests (vs $3.50 for REST API).
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref StackEnv
+      Description: "IntentWeave HTTP API"
+      # Disable default throttling to let Lambda reserved concurrency control load.
+      # Re-enable and tune DefaultRouteSettings if you need hard rate limits.
+      # DefaultRouteSettings:
+      #   ThrottlingBurstLimit: 50
+      #   ThrottlingRateLimit: 100
+
+  # ─── CloudWatch Logs ───────────────────────────────────────────────────────
+
+  FunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${IntentWeaveFunction}"
+      RetentionInDays: !Ref LogRetentionDays
+
+# ─── Outputs ───────────────────────────────────────────────────────────────────
+
+Outputs:
+
+  ApiEndpoint:
+    Description: HTTP API endpoint URL (POST /message)
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/${StackEnv}/message"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiEndpoint"
+
+  SessionsTableName:
+    Description: DynamoDB sessions table name
+    Value: !Ref SessionsTable
+    Export:
+      Name: !Sub "${AWS::StackName}-SessionsTable"
+
+  SessionsTableArn:
+    Description: DynamoDB sessions table ARN
+    Value: !GetAtt SessionsTable.Arn
+
+  FunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt IntentWeaveFunction.Arn
+
+  FunctionName:
+    Description: Lambda function name
+    Value: !Ref IntentWeaveFunction

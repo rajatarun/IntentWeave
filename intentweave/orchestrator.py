@@ -16,7 +16,7 @@ from intentweave.decision_engine import Action, decide
 from intentweave.intent_registry import get_intent_config, get_tool_name, route_intent
 from intentweave.models import Session
 from intentweave.personas import PERSONAS, transform
-from intentweave.session_store import SessionStore, store as _default_store
+from intentweave.session_store import AbstractSessionStore, SessionStore, store as _default_store
 from intentweave.slot_engine import apply_slot_updates, compute_missing_slots
 from intentweave.states import State
 
@@ -150,7 +150,7 @@ def handle_user_message(
     *,
     user_id: str = "anonymous",
     persona: str = "PROFESSIONAL",
-    _store: SessionStore | None = None,
+    _store: AbstractSessionStore | None = None,
 ) -> dict:
     """
     Deterministic orchestration entry point.
