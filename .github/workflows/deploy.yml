@@ -2,12 +2,9 @@ name: IntentWeave CI/CD
 
 on:
   push:
-    branches:
-      - main
-      - "claude/**"
+    branches: [main]
   pull_request:
-    branches:
-      - main
+    branches: [main]
 
 # OIDC token permission — required for AWS assume-role without stored keys
 permissions:
@@ -17,7 +14,7 @@ permissions:
 env:
   PYTHON_VERSION: "3.11"
   AWS_REGION: us-east-1
-  SAM_STACK_BASE: intentweave
+  SAM_STACK_NAME: intentweave-prod
 
 jobs:
   # ── Test ─────────────────────────────────────────────────────────────────────
@@ -41,20 +38,13 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v --tb=short
 
-  # ── Deploy ───────────────────────────────────────────────────────────────────
+  # ── Deploy (prod, main only) ──────────────────────────────────────────────────
   deploy:
-    name: Deploy → ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+    name: Deploy → prod
     needs: test
-    # Deploy on push only — not on PRs (PRs only run tests)
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-
-    # GitHub Environment enables deployment protection rules and secrets scoping.
-    # Create "prod" and "dev" environments in repo Settings → Environments.
-    environment: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
-
-    env:
-      STACK_ENV: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+    environment: prod
 
     steps:
       - uses: actions/checkout@v4
@@ -68,12 +58,10 @@ jobs:
       - name: Install runtime dependencies
         run: pip install -r requirements.txt
 
-      # SAM CLI — use-installer avoids pip-installing into system Python
       - uses: aws-actions/setup-sam@v2
         with:
           use-installer: true
 
-      # Assume the deploy role via OIDC — no long-lived credentials stored
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -81,22 +69,21 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: intentweave-deploy-${{ github.run_id }}
 
-      # Build once; cache the .aws-sam/build directory between runs if desired
       - name: SAM build
         run: sam build --parallel
 
       - name: SAM deploy
         run: |
           sam deploy \
-            --stack-name "${{ env.SAM_STACK_BASE }}-${{ env.STACK_ENV }}" \
+            --stack-name "${{ env.SAM_STACK_NAME }}" \
             --region "${{ env.AWS_REGION }}" \
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
             --resolve-s3 \
-            --s3-prefix "${{ env.SAM_STACK_BASE }}" \
+            --s3-prefix intentweave \
             --parameter-overrides \
-              StackEnv=${{ env.STACK_ENV }} \
+              StackEnv=prod \
               SessionTtlDays=7 \
               LambdaMemoryMB=256 \
               LogRetentionDays=14
@@ -104,10 +91,10 @@ jobs:
       - name: Print deployed endpoint
         run: |
           ENDPOINT=$(aws cloudformation describe-stacks \
-            --stack-name "${{ env.SAM_STACK_BASE }}-${{ env.STACK_ENV }}" \
+            --stack-name "${{ env.SAM_STACK_NAME }}" \
             --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
             --output text)
-          echo "✓ API endpoint: $ENDPOINT"
+          echo "API endpoint: $ENDPOINT"
           echo "INTENTWEAVE_ENDPOINT=$ENDPOINT" >> "$GITHUB_ENV"
 
       - name: Smoke test deployed endpoint
@@ -117,5 +104,4 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{"session_id":"smoke-${{ github.run_id }}","user_message":"book a flight to London"}')
           echo "HTTP status: $STATUS"
-          # 200 = success, 502/503 would mean the Lambda itself errored at infra level
           [ "$STATUS" -eq 200 ] || [ "$STATUS" -eq 500 ] || exit 1
