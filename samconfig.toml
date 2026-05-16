@@ -7,7 +7,7 @@ version = 0.1
 [default.global.parameters]
 stack_name     = "intentweave"
 region         = "us-east-1"
-confirm_changeset = true
+confirm_changeset = true   # overridden to false by the CI workflow (--no-confirm-changeset)
 capabilities   = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
 
 [default.build.parameters]

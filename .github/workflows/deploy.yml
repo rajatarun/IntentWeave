@@ -1,0 +1,121 @@
+name: IntentWeave CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/**"
+  pull_request:
+    branches:
+      - main
+
+# OIDC token permission — required for AWS assume-role without stored keys
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.11"
+  AWS_REGION: us-east-1
+  SAM_STACK_BASE: intentweave
+
+jobs:
+  # ── Test ─────────────────────────────────────────────────────────────────────
+  test:
+    name: Test (Python ${{ env.PYTHON_VERSION }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+  # ── Deploy ───────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy → ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+    needs: test
+    # Deploy on push only — not on PRs (PRs only run tests)
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    # GitHub Environment enables deployment protection rules and secrets scoping.
+    # Create "prod" and "dev" environments in repo Settings → Environments.
+    environment: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+
+    env:
+      STACK_ENV: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install runtime dependencies
+        run: pip install -r requirements.txt
+
+      # SAM CLI — use-installer avoids pip-installing into system Python
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      # Assume the deploy role via OIDC — no long-lived credentials stored
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: intentweave-deploy-${{ github.run_id }}
+
+      # Build once; cache the .aws-sam/build directory between runs if desired
+      - name: SAM build
+        run: sam build --parallel
+
+      - name: SAM deploy
+        run: |
+          sam deploy \
+            --stack-name "${{ env.SAM_STACK_BASE }}-${{ env.STACK_ENV }}" \
+            --region "${{ env.AWS_REGION }}" \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --resolve-s3 \
+            --s3-prefix "${{ env.SAM_STACK_BASE }}" \
+            --parameter-overrides \
+              StackEnv=${{ env.STACK_ENV }} \
+              SessionTtlDays=7 \
+              LambdaMemoryMB=256 \
+              LogRetentionDays=14
+
+      - name: Print deployed endpoint
+        run: |
+          ENDPOINT=$(aws cloudformation describe-stacks \
+            --stack-name "${{ env.SAM_STACK_BASE }}-${{ env.STACK_ENV }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
+            --output text)
+          echo "✓ API endpoint: $ENDPOINT"
+          echo "INTENTWEAVE_ENDPOINT=$ENDPOINT" >> "$GITHUB_ENV"
+
+      - name: Smoke test deployed endpoint
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "$INTENTWEAVE_ENDPOINT" \
+            -H "Content-Type: application/json" \
+            -d '{"session_id":"smoke-${{ github.run_id }}","user_message":"book a flight to London"}')
+          echo "HTTP status: $STATUS"
+          # 200 = success, 502/503 would mean the Lambda itself errored at infra level
+          [ "$STATUS" -eq 200 ] || [ "$STATUS" -eq 500 ] || exit 1

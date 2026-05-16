@@ -22,6 +22,29 @@ lint:
 
 # ─── AWS Build & Deploy ────────────────────────────────────────────────────────
 
+bootstrap-oidc:
+	@echo "Deploying GitHub OIDC role (one-time setup)..."
+	@read -p "GitHub org [rajatarun]: " ORG; ORG=$${ORG:-rajatarun}; \
+	 read -p "GitHub repo [IntentWeave]: " REPO; REPO=$${REPO:-IntentWeave}; \
+	 read -p "OIDC provider already exists? (true/false) [false]: " EXISTS; EXISTS=$${EXISTS:-false}; \
+	 SHOULD_CREATE=$$([ "$$EXISTS" = "true" ] && echo "false" || echo "true"); \
+	 aws cloudformation deploy \
+	   --template-file infra/github-oidc-role.yaml \
+	   --stack-name intentweave-github-oidc \
+	   --capabilities CAPABILITY_NAMED_IAM \
+	   --region $(REGION) \
+	   --parameter-overrides \
+	     GitHubOrg=$$ORG \
+	     GitHubRepo=$$REPO \
+	     CreateOIDCProvider=$$SHOULD_CREATE; \
+	 echo ""; \
+	 echo "==> Store this ARN as AWS_DEPLOY_ROLE_ARN in GitHub Secrets:"; \
+	 aws cloudformation describe-stacks \
+	   --stack-name intentweave-github-oidc \
+	   --query "Stacks[0].Outputs[?OutputKey=='GitHubDeployRoleArn'].OutputValue" \
+	   --output text \
+	   --region $(REGION)
+
 validate:
 	sam validate --template template.yaml --region $(REGION)
 

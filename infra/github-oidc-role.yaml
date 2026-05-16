@@ -1,0 +1,262 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  One-time bootstrap: GitHub Actions OIDC provider + least-privilege IAM
+  deploy role for IntentWeave.
+
+  Deploy this stack ONCE, then store the GitHubDeployRoleArn output as the
+  AWS_DEPLOY_ROLE_ARN secret in your GitHub repository.
+
+  Usage:
+    aws cloudformation deploy \
+      --template-file infra/github-oidc-role.yaml \
+      --stack-name intentweave-github-oidc \
+      --capabilities CAPABILITY_NAMED_IAM \
+      --parameter-overrides \
+        GitHubOrg=rajatarun \
+        GitHubRepo=IntentWeave
+
+Parameters:
+
+  GitHubOrg:
+    Type: String
+    Description: GitHub organisation or username that owns the repository.
+
+  GitHubRepo:
+    Type: String
+    Description: Repository name (without the org prefix).
+
+  AllowedBranches:
+    Type: String
+    Default: "*"
+    Description: >
+      Branch glob passed to the OIDC sub condition.
+      "*" trusts all branches. Use "ref:refs/heads/main" to restrict to main only.
+
+  CreateOIDCProvider:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Set to "false" if the GitHub Actions OIDC provider
+      (token.actions.githubusercontent.com) already exists in this account.
+      An account can only have one OIDC provider per issuer URL.
+
+  IntentWeaveStackPrefix:
+    Type: String
+    Default: intentweave
+    Description: CloudFormation stack name prefix; the role is scoped to stacks matching <prefix>-*.
+
+Conditions:
+  ShouldCreateOIDCProvider: !Equals [!Ref CreateOIDCProvider, "true"]
+
+Resources:
+
+  # ── GitHub OIDC provider ─────────────────────────────────────────────────────
+  # Singleton per AWS account. Skip with CreateOIDCProvider=false if it exists.
+
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateOIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      # Thumbprints for token.actions.githubusercontent.com (current as of 2024).
+      # AWS validates the certificate chain automatically; these are a backstop.
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+
+  # ── Deploy IAM role ──────────────────────────────────────────────────────────
+
+  GitHubDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "intentweave-github-deploy-${AWS::Region}"
+      MaxSessionDuration: 3600   # 1 hour; covers the longest possible deploy
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                # Audience must be sts.amazonaws.com (aws-actions/configure-aws-credentials default)
+                "token.actions.githubusercontent.com:aud": sts.amazonaws.com
+              StringLike:
+                # sub format: repo:<org>/<repo>:ref:refs/heads/<branch>  OR  repo:<org>/<repo>:*
+                "token.actions.githubusercontent.com:sub":
+                  !Sub "repo:${GitHubOrg}/${GitHubRepo}:${AllowedBranches}"
+      Policies:
+
+        # ── CloudFormation ──────────────────────────────────────────────────
+        - PolicyName: CloudFormationDeploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ManageIntentWeaveStacks
+                Effect: Allow
+                Action: cloudformation:*
+                Resource:
+                  - !Sub "arn:aws:cloudformation:*:${AWS::AccountId}:stack/${IntentWeaveStackPrefix}-*/*"
+                  - !Sub "arn:aws:cloudformation:*:${AWS::AccountId}:stack/aws-sam-cli-managed-*/*"
+              - Sid: ValidateAndDescribeChangesets
+                Effect: Allow
+                Action:
+                  - cloudformation:ValidateTemplate
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ListStacks
+                Resource: "*"
+
+        # ── S3 (SAM artifact bucket) ────────────────────────────────────────
+        - PolicyName: SAMArtifactBucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: SAMBucketManage
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:GetBucketLocation
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketPolicy
+                  - s3:PutBucketVersioning
+                  - s3:GetEncryptionConfiguration
+                  - s3:PutEncryptionConfiguration
+                  - s3:ListBucket
+                Resource: !Sub "arn:aws:s3:::aws-sam-cli-managed-*"
+              - Sid: SAMBucketObjects
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                Resource: !Sub "arn:aws:s3:::aws-sam-cli-managed-*/*"
+
+        # ── Lambda ─────────────────────────────────────────────────────────
+        - PolicyName: LambdaDeploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: LambdaManage
+                Effect: Allow
+                Action:
+                  - lambda:CreateFunction
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:DeleteFunction
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                  - lambda:ListFunctions
+                  - lambda:AddPermission
+                  - lambda:RemovePermission
+                  - lambda:GetPolicy
+                  - lambda:TagResource
+                  - lambda:UntagResource
+                  - lambda:PutFunctionConcurrency
+                Resource:
+                  - !Sub "arn:aws:lambda:*:${AWS::AccountId}:function:${IntentWeaveStackPrefix}-*"
+
+        # ── DynamoDB ────────────────────────────────────────────────────────
+        - PolicyName: DynamoDBDeploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DynamoDBManage
+                Effect: Allow
+                Action:
+                  - dynamodb:CreateTable
+                  - dynamodb:UpdateTable
+                  - dynamodb:DeleteTable
+                  - dynamodb:DescribeTable
+                  - dynamodb:DescribeTimeToLive
+                  - dynamodb:UpdateTimeToLive
+                  - dynamodb:DescribeContinuousBackups
+                  - dynamodb:UpdateContinuousBackups
+                  - dynamodb:ListTagsOfResource
+                  - dynamodb:TagResource
+                  - dynamodb:UntagResource
+                Resource:
+                  - !Sub "arn:aws:dynamodb:*:${AWS::AccountId}:table/${IntentWeaveStackPrefix}-*"
+
+        # ── API Gateway (HTTP API v2) ────────────────────────────────────────
+        - PolicyName: APIGatewayDeploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: APIGatewayManage
+                Effect: Allow
+                Action:
+                  - apigateway:GET
+                  - apigateway:POST
+                  - apigateway:PUT
+                  - apigateway:PATCH
+                  - apigateway:DELETE
+                  - apigateway:TagResource
+                  - apigateway:UntagResource
+                Resource: "arn:aws:apigateway:*::*"
+
+        # ── IAM (scoped to stack-prefixed roles only) ────────────────────────
+        - PolicyName: IAMDeploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ManageStackRoles
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:UpdateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:PassRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:TagRole
+                  - iam:UntagRole
+                Resource:
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/${IntentWeaveStackPrefix}-*"
+
+        # ── CloudWatch Logs ─────────────────────────────────────────────────
+        - PolicyName: CloudWatchLogsDeploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ManageLogGroups
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:DescribeLogGroups
+                  - logs:PutRetentionPolicy
+                  - logs:DeleteRetentionPolicy
+                  - logs:ListTagsLogGroup
+                  - logs:TagLogGroup
+                  - logs:UntagLogGroup
+                Resource:
+                  - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/lambda/${IntentWeaveStackPrefix}-*"
+
+Outputs:
+
+  GitHubDeployRoleArn:
+    Description: >
+      Add this value as the AWS_DEPLOY_ROLE_ARN secret in your GitHub
+      repository (Settings → Secrets and variables → Actions).
+    Value: !GetAtt GitHubDeployRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-DeployRoleArn"
+
+  OIDCProviderArn:
+    Condition: ShouldCreateOIDCProvider
+    Description: GitHub Actions OIDC provider ARN (account-level singleton).
+    Value: !GetAtt GitHubOIDCProvider.Arn
+
+  TrustPolicySummary:
+    Description: Which GitHub identity is trusted to assume the deploy role.
+    Value: !Sub "repo:${GitHubOrg}/${GitHubRepo}:${AllowedBranches}"
