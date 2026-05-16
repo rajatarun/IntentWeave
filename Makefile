@@ -1,0 +1,55 @@
+.PHONY: install test lint build deploy deploy-guided validate clean invoke
+
+PYTHON   := python3
+PIP      := $(PYTHON) -m pip
+PYTEST   := $(PYTHON) -m pytest
+STACK    := intentweave
+REGION   := us-east-1
+
+# ─── Development ──────────────────────────────────────────────────────────────
+
+install:
+	$(PIP) install -r requirements.txt -r requirements-dev.txt
+
+test:
+	$(PYTEST) tests/ -v --tb=short
+
+test-cov:
+	$(PYTEST) tests/ -v --cov=intentweave --cov-report=term-missing --cov-report=html
+
+lint:
+	$(PYTHON) -m flake8 intentweave/ lambda_handler.py --max-line-length=100
+
+# ─── AWS Build & Deploy ────────────────────────────────────────────────────────
+
+validate:
+	sam validate --template template.yaml --region $(REGION)
+
+build:
+	sam build
+
+deploy: build
+	sam deploy
+
+deploy-guided: build
+	sam deploy --guided
+
+# ─── Smoke test (post-deploy) ─────────────────────────────────────────────────
+
+invoke:
+	@ENDPOINT=$$(aws cloudformation describe-stacks \
+		--stack-name $(STACK) \
+		--query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
+		--output text --region $(REGION)); \
+	echo "POST $$ENDPOINT"; \
+	curl -s -X POST "$$ENDPOINT" \
+		-H "Content-Type: application/json" \
+		-d '{"session_id":"smoke-test-1","user_message":"book a flight to Paris","persona":"PROFESSIONAL"}' \
+		| python3 -m json.tool
+
+# ─── Cleanup ──────────────────────────────────────────────────────────────────
+
+clean:
+	rm -rf .aws-sam htmlcov .coverage
+	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	find . -name "*.pyc" -delete
