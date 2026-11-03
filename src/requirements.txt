@@ -1,0 +1,2 @@
+# boto3 is included in the AWS Lambda Python 3.12 runtime; pin for local parity.
+boto3>=1.35.0,<2
