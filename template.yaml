@@ -1,0 +1,121 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+Description: >
+  IntentWeave — provider-agnostic message thread cache (Claude Message Threads semantics).
+  HTTP API → Lambda → DynamoDB with TTL.
+
+Parameters:
+  StackEnv:
+    Type: String
+    Default: dev
+    AllowedValues: [prod, staging, dev]
+
+  ThreadSoftTtlSeconds:
+    Type: Number
+    Default: 300
+    Description: Soft expiry (~5 minutes after last successful store).
+
+  ThreadHardTtlSeconds:
+    Type: Number
+    Default: 3600
+    Description: DynamoDB TTL hard delete horizon after last use.
+
+  IntentWeaveProvider:
+    Type: String
+    Default: mock
+    AllowedValues: [mock, anthropic, bedrock]
+    Description: LLM provider adapter (mock needs no API keys).
+
+  LambdaMemoryMB:
+    Type: Number
+    Default: 256
+    AllowedValues: [128, 256, 512, 1024]
+
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [7, 14, 30, 60, 90]
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 29
+    MemorySize: !Ref LambdaMemoryMB
+    Architectures: [arm64]
+    Environment:
+      Variables:
+        THREADS_TABLE_NAME: !Ref ThreadsTable
+        THREAD_SOFT_TTL_SECONDS: !Ref ThreadSoftTtlSeconds
+        THREAD_HARD_TTL_SECONDS: !Ref ThreadHardTtlSeconds
+        INTENTWEAVE_PROVIDER: !Ref IntentWeaveProvider
+        LOG_LEVEL: INFO
+
+Resources:
+  ThreadsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${AWS::StackName}-${StackEnv}-threads"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: response_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: response_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  MessagesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-${StackEnv}-messages"
+      CodeUri: src/
+      Handler: handler.lambda_handler
+      Description: IntentWeave /v1/messages thread router
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ThreadsTable
+      Events:
+        Health:
+          Type: HttpApi
+          Properties:
+            Path: /health
+            Method: GET
+            ApiId: !Ref HttpApi
+        Messages:
+          Type: HttpApi
+          Properties:
+            Path: /v1/messages
+            Method: POST
+            ApiId: !Ref HttpApi
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref StackEnv
+      CorsConfiguration:
+        AllowMethods: [GET, POST, OPTIONS]
+        AllowOrigins: ["*"]
+        AllowHeaders: [content-type, authorization, x-request-id]
+
+  MessagesLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${MessagesFunction}"
+      RetentionInDays: !Ref LogRetentionDays
+
+Outputs:
+  ApiEndpoint:
+    Description: HTTP API base URL
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/${StackEnv}"
+  ThreadsTableName:
+    Description: DynamoDB table for thread turns
+    Value: !Ref ThreadsTable
