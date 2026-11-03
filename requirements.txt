@@ -1,0 +1,2 @@
+# Runtime dependencies (Lambda bundle)
+boto3>=1.35.0,<2
