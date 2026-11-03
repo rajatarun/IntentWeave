@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 def lambda_handler(event: dict[str, Any], context: Any, service: ThreadService) -> dict[str, Any]:
     del context
     method = _method(event)
-    path = event.get("rawPath") or event.get("path") or "/"
+    path = _normalize_path(event)
 
     if method == "GET" and path.rstrip("/") == "/health":
         return _json_response(200, {"status": "ok"})
@@ -71,6 +71,18 @@ def _parse_body(event: dict[str, Any]) -> dict[str, Any]:
 
         raise invalid_request("Body must be a JSON object.")
     return parsed
+
+
+def _normalize_path(event: dict[str, Any]) -> str:
+    path = event.get("rawPath") or event.get("path") or "/"
+    ctx = event.get("requestContext") or {}
+    stage = ctx.get("stage")
+    if not stage or stage == "$default":
+        return path
+    prefix = f"/{stage}"
+    if path == prefix or path.startswith(prefix + "/"):
+        return path[len(prefix) :] or "/"
+    return path
 
 
 def _method(event: dict[str, Any]) -> str:
