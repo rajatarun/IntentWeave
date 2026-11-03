@@ -5,12 +5,16 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 env:
   PYTHON_VERSION: "3.12"
+  AWS_REGION: us-east-1
+  STACK_NAME: intentweave-prod
+  DEPLOY_ROLE_ARN: arn:aws:iam::239571291755:role/teamweave-github-actions-sam-deployer
 
 jobs:
   test:
@@ -53,3 +57,94 @@ jobs:
 
       - name: SAM build
         run: sam build --parallel
+
+  deploy-prod:
+    name: Deploy prod (SAM)
+    needs: [test, sam-build]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: prod
+    concurrency:
+      group: intentweave-prod-deploy
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN || 'arn:aws:iam::239571291755:role/teamweave-github-actions-sam-deployer' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: intentweave-prod-${{ github.run_id }}
+
+      - name: SAM build
+        run: sam build --parallel
+
+      - name: SAM deploy
+        run: |
+          sam deploy \
+            --stack-name "${{ env.STACK_NAME }}" \
+            --region "${{ env.AWS_REGION }}" \
+            --capabilities CAPABILITY_IAM \
+            --resolve-s3 \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              StackEnv=prod \
+              ThreadSoftTtlSeconds=300 \
+              ThreadHardTtlSeconds=3600 \
+              IntentWeaveProvider=mock \
+              LambdaMemoryMB=256 \
+              LogRetentionDays=14
+
+      - name: Resolve ApiEndpoint
+        id: stack
+        run: |
+          API_ENDPOINT=$(aws cloudformation describe-stacks \
+            --stack-name "${{ env.STACK_NAME }}" \
+            --region "${{ env.AWS_REGION }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
+            --output text)
+          if [ -z "$API_ENDPOINT" ] || [ "$API_ENDPOINT" = "None" ]; then
+            echo "::error::ApiEndpoint output missing on stack ${{ env.STACK_NAME }}"
+            exit 1
+          fi
+          echo "api_endpoint=$API_ENDPOINT" >> "$GITHUB_OUTPUT"
+          echo "ApiEndpoint=$API_ENDPOINT"
+
+      - name: Smoke test — GET /health
+        run: |
+          code=$(curl -sS -o /tmp/health.json -w "%{http_code}" \
+            "${{ steps.stack.outputs.api_endpoint }}/health")
+          echo "HTTP $code"
+          cat /tmp/health.json
+          test "$code" = "200"
+
+      - name: Smoke test — POST /v1/messages (mock)
+        run: |
+          code=$(curl -sS -o /tmp/messages.json -w "%{http_code}" \
+            -X POST "${{ steps.stack.outputs.api_endpoint }}/v1/messages" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "model": "claude-test-1",
+              "max_tokens": 64,
+              "messages": [{"role": "user", "content": "ci smoke"}],
+              "thread": {"type": "create"}
+            }')
+          echo "HTTP $code"
+          cat /tmp/messages.json
+          test "$code" = "200"
