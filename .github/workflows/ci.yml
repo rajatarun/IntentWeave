@@ -12,9 +12,6 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.12"
-  AWS_REGION: us-east-1
-  STACK_NAME: intentweave-prod
-  DEPLOY_ROLE_ARN: arn:aws:iam::239571291755:role/teamweave-github-actions-sam-deployer
 
 jobs:
   test:
@@ -66,13 +63,15 @@ jobs:
     timeout-minutes: 25
     environment: prod
     concurrency:
-      group: intentweave-prod-deploy
+      group: ${{ vars.AWS_STACK_NAME }}-deploy
       cancel-in-progress: false
     permissions:
       id-token: write
       contents: read
     env:
-      DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN || 'arn:aws:iam::239571291755:role/teamweave-github-actions-sam-deployer' }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      STACK_NAME: ${{ vars.AWS_STACK_NAME }}
+      DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -89,7 +88,7 @@ jobs:
         with:
           role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          role-session-name: intentweave-prod-${{ github.run_id }}
+          role-session-name: ${{ vars.AWS_STACK_NAME }}-${{ github.run_id }}
 
       - name: SAM build
         run: sam build --parallel
