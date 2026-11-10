@@ -34,6 +34,8 @@ sam deploy --guided
 
 Set `THREADS_TABLE_NAME` via the stack for durable threads. See [Environment variables](#environment-variables) and [docs/design/SECURITY_NOTES.md](docs/design/SECURITY_NOTES.md) before exposing a public endpoint.
 
+For CI/CD production deploys, required GitHub **secrets** and **variables** are listed in [docs/DEPLOY_CONFIG.md](docs/DEPLOY_CONFIG.md).
+
 ## Core workflow (copy-paste)
 
 These three patterns mirror production use: create, continue with new messages only, and resume after `pause_turn`.
