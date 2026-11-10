@@ -1,57 +1,44 @@
 # IntentWeave
 
-Provider-agnostic **message thread** service that mirrors [Anthropic Claude Message Threads](https://platform.claude.com/docs/en/build-with-claude/message-threads) semantics. IntentWeave stores short-lived server-side conversation turns so clients can send the full history once, then only new messages plus `previous_message_id` on later turns.
+**Keep multi-turn LLM requests small** by storing short-lived server-side message threads with Claude Message Threads–compatible semantics—while your app remains the source of truth.
 
-**Your application remains the source of truth.** Threads are a best-effort cache. On `thread_not_found` (404), replay the full conversation with `thread: { "type": "create" }`.
+**Who this is for:** Teams building on AWS (Lambda + HTTP API) who want create/continue thread behavior, replay guidance on expiry, and a pluggable LLM backend—without sending the full chat history on every turn.
 
-## Architecture
+> `[Demo GIF placeholder]` — screen recording of create → continue via `examples/local_thread_lifecycle.py` (contributions welcome).
 
-```text
-Client ──► API Gateway HTTP API ──► Lambda (handler.py)
-                                      │
-                                      ├─ ThreadService (create / continue / fingerprint)
-                                      ├─ ThreadStore (DynamoDB in AWS, in-memory if no table)
-                                      └─ MessageProvider (mock default; optional adapters)
-                                              │
-                                              ▼
-                                        DynamoDB (response_id PK, ttl attribute)
+## Quickstart (~5 minutes)
+
+No AWS account needed for local try-out (mock provider + in-memory store).
+
+```bash
+git clone https://github.com/rajatarun/IntentWeave.git
+cd IntentWeave
+make install
+export PATH="$HOME/.local/bin:$PATH"
+make test
+PYTHONPATH=src python3 examples/local_thread_lifecycle.py
 ```
 
-| Component | Role |
-| --- | --- |
-| `ThreadService` | Validates thread rules, merges stored messages, routes to provider |
-| `ThreadStore` | One item per assistant **response id**; tracks `continued`, in-flight continue, TTL |
-| `MessageProvider` | Pluggable LLM backend (`mock` for CI/local; `anthropic` / `bedrock` reserved) |
+You should see two assistant lines with `msg_…` ids and mock echo text.
 
-### DynamoDB schema
+More examples: [examples/README.md](examples/README.md).
 
-| Attribute | Type | Description |
-| --- | --- | --- |
-| `response_id` (PK) | S | Assistant message id for this turn |
-| `thread_id` | S | Root thread id (first create response id) |
-| `parent_response_id` | S | Previous response id continued from |
-| `fingerprint_json` | M | Fixed fields from create (see below) |
-| `system` | Any | Create-only system prompt |
-| `tools` | Any | Create-only tools |
-| `messages` | L | Full conversation including assistant turns |
-| `model` | S | Model id |
-| `stop_reason` | S | e.g. `end_turn`, `pause_turn`, `refusal` |
-| `assistant_message` | M | Cached assistant payload |
-| `continued` | BOOL | Whether this id was already continued |
-| `continue_in_flight` | BOOL | Concurrent continue guard |
-| `last_used_epoch` | N | Soft TTL anchor (default 300s) |
-| `ttl` | N | DynamoDB TTL for hard delete (default 3600s) |
-| `refused` / `paused` | BOOL | Refusal / pause_turn flags |
+### Deploy (requires AWS)
 
-Table encryption: SSE enabled (AWS-managed). Follow your org CMK pattern for production if required (see ContextWeave / DeviceWeave).
+This repo ships a SAM template only; deploy in your account:
 
-## API
+```bash
+sam build
+sam deploy --guided
+```
 
-### `POST /v1/messages`
+Set `THREADS_TABLE_NAME` via the stack for durable threads. See [Environment variables](#environment-variables) and [docs/design/SECURITY_NOTES.md](docs/design/SECURITY_NOTES.md) before exposing a public endpoint.
 
-Claude-shaped request body with a top-level `thread` object.
+## Core workflow (copy-paste)
 
-**Create**
+These three patterns mirror production use: create, continue with new messages only, and resume after `pause_turn`.
+
+### 1. Create thread
 
 ```bash
 curl -sS "$API/v1/messages" \
@@ -66,7 +53,11 @@ curl -sS "$API/v1/messages" \
   }'
 ```
 
-**Continue** (only new messages; do **not** send `system` or `tools`)
+Save `id` from the response as `MSG_ID`.
+
+### 2. Continue (new messages only)
+
+Do **not** send `system` or `tools` on continue.
 
 ```bash
 curl -sS "$API/v1/messages" \
@@ -80,7 +71,9 @@ curl -sS "$API/v1/messages" \
   }'
 ```
 
-**`pause_turn` resume** — continue from the paused response id with an empty `messages` array:
+### 3. Resume after `pause_turn`
+
+Continue from the paused response id with an **empty** `messages` array (no new user content while paused).
 
 ```bash
 curl -sS "$API/v1/messages" \
@@ -94,9 +87,30 @@ curl -sS "$API/v1/messages" \
   }'
 ```
 
-Do not send new user messages while the turn is paused.
+On `thread_not_found` (404), replay full history with a new **create**. See [Replay guidance](#replay-guidance).
 
-### Thread rules (parity with Claude)
+## How it works
+
+```text
+Client ──► API Gateway HTTP API ──► Lambda (handler.py)
+                                      │
+                                      ├─ ThreadService (create / continue / fingerprint)
+                                      ├─ ThreadStore (DynamoDB in AWS, in-memory if no table)
+                                      └─ MessageProvider (mock default; anthropic/bedrock planned)
+                                              │
+                                              ▼
+                                        DynamoDB (response_id PK, ttl attribute)
+```
+
+| Component | Role |
+| --- | --- |
+| `ThreadService` | Validates thread rules, merges stored messages, routes to provider |
+| `ThreadStore` | One item per assistant **response id**; tracks `continued`, in-flight continue, TTL |
+| `MessageProvider` | Pluggable LLM backend (`mock` for CI/local; other adapters via `INTENTWEAVE_PROVIDER`) |
+
+Extension points: [docs/EXTENDING.md](docs/EXTENDING.md). Integration ideas: [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
+
+## Thread rules (parity with Claude)
 
 | Rule | Behavior |
 | --- | --- |
@@ -108,7 +122,11 @@ Do not send new user messages while the turn is paused.
 | Refusal | Do not continue after `stop_reason: refusal` |
 | Edits / branches | New create with full history (no in-place edit) |
 
-IntentWeave does **not** require Anthropic beta headers on its own API. Map `betas` → `feature_flags` in the fingerprint when you want Claude parity.
+## API reference
+
+### `POST /v1/messages`
+
+Claude-shaped JSON body with a top-level `thread` object (`create` or `continue`).
 
 ### Error shape
 
@@ -126,7 +144,7 @@ IntentWeave does **not** require Anthropic beta headers on its own API. Map `bet
 
 ### `GET /health`
 
-Liveness probe returning `{"status":"ok"}`.
+Returns `{"status":"ok"}`.
 
 ## Environment variables
 
@@ -135,7 +153,7 @@ Liveness probe returning `{"status":"ok"}`.
 | `THREADS_TABLE_NAME` | _(unset → in-memory store)_ | DynamoDB table name |
 | `THREAD_SOFT_TTL_SECONDS` | `300` | Soft expiry after last successful store |
 | `THREAD_HARD_TTL_SECONDS` | `3600` | DynamoDB TTL attribute horizon |
-| `INTENTWEAVE_PROVIDER` | `mock` | `mock` (default), `anthropic`, `bedrock` (stubs) |
+| `INTENTWEAVE_PROVIDER` | `mock` | `mock` (default); `anthropic` / `bedrock` reserved (not implemented) |
 | `LOG_LEVEL` | `INFO` | Log level |
 
 ## Local development
@@ -144,25 +162,14 @@ Liveness probe returning `{"status":"ok"}`.
 make install
 make test
 make lint
-make validate   # sam validate --lint
+make validate   # sam validate --lint (requires SAM CLI)
 make sam-build
 ```
 
-The **mock provider** echoes deterministic assistant text (no API keys). Test hooks in user text:
+**Mock provider** echoes deterministic assistant text (no API keys). Test hooks in user content:
 
 - `__intentweave_pause__` → `stop_reason: pause_turn`
 - `__intentweave_refusal__` → `stop_reason: refusal`
-
-## Deploy (SAM)
-
-This repo ships `template.yaml` only; deploy from your AWS account:
-
-```bash
-sam build
-sam deploy --guided
-```
-
-Parameters: `ThreadSoftTtlSeconds`, `ThreadHardTtlSeconds`, `IntentWeaveProvider`, `StackEnv`.
 
 ## Replay guidance
 
@@ -171,11 +178,21 @@ Parameters: `ThreadSoftTtlSeconds`, `ThreadHardTtlSeconds`, `IntentWeaveProvider
 3. Continue from the new response id.
 4. On `thread_already_continued` or `thread_continue_in_flight`, replay if you never received the next response.
 
-## Follow-ups
+## Documentation map
 
-- Wire **mcp-observatory** quality gates for API contract tests.
-- Implement optional **Anthropic Messages** and **Bedrock Converse** providers behind `INTENTWEAVE_PROVIDER`.
-- Multi-tenant auth, billing, message batches, and on-demand compaction remain out of scope for v1.
+| Doc | Purpose |
+| --- | --- |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, tests, PR process |
+| [SECURITY.md](SECURITY.md) | Vulnerability reporting |
+| [docs/design/SECURITY_NOTES.md](docs/design/SECURITY_NOTES.md) | Threat model and deployment hardening |
+| [docs/GOOD_FIRST_ISSUES.md](docs/GOOD_FIRST_ISSUES.md) | Starter tasks for new contributors |
+| [docs/LAUNCH.md](docs/LAUNCH.md) | Draft launch post (not published) |
+
+## Roadmap (high level)
+
+- Implement **Anthropic Messages** and **Bedrock Converse** providers behind `INTENTWEAVE_PROVIDER`.
+- API contract tests and optional observability (OpenTelemetry).
+- Multi-tenant auth, billing, message batches, and on-demand compaction remain **out of scope for v1**.
 
 ## License
 
