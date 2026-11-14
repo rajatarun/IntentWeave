@@ -23,6 +23,7 @@ _service = ThreadService(
     _clock,
     soft_ttl_seconds=_settings.soft_ttl_seconds,
     hard_ttl_seconds=_settings.hard_ttl_seconds,
+    provider_name=_settings.provider,
 )
 
 

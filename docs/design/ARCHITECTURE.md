@@ -9,7 +9,10 @@ See the [README architecture section](../README.md#how-it-works) for the overvie
 | `response_id` (PK) | S | Assistant message id for this turn |
 | `thread_id` | S | Root thread id (first create response id) |
 | `parent_response_id` | S | Previous response id continued from |
-| `fingerprint_json` | M | Fixed fields from create (see `intentweave.fingerprint`) |
+| `fingerprint_json` | M | Fixed fields from create + `history_digest` (see `intentweave.fingerprint`; v2 omits `model`) |
+| `provider` | S | Backend adapter id for this turn (`INTENTWEAVE_PROVIDER`) |
+| `model_policy` | S | `routed` or `pinned` (legacy items default to `pinned`) |
+| `pinned_model` | S | Create-time model when policy is `pinned` |
 | `system` | Any | Create-only system prompt |
 | `tools` | Any | Create-only tools |
 | `messages` | L | Full conversation including assistant turns |

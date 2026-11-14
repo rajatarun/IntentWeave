@@ -47,6 +47,28 @@ def fingerprint_mismatch(fields: list[str]) -> ThreadError:
     )
 
 
+def model_policy_violation(*, requested_model: str, pinned_model: str) -> ThreadError:
+    return ThreadError(
+        http_status=400,
+        error_type="invalid_request_error",
+        message=(
+            f"Thread model_policy is pinned; requested model {requested_model!r} "
+            f"does not match pinned model {pinned_model!r}."
+        ),
+        error_code="thread_model_policy_violation",
+        details={"requested_model": requested_model, "pinned_model": pinned_model},
+    )
+
+
+def history_integrity_violation() -> ThreadError:
+    return ThreadError(
+        http_status=400,
+        error_type="invalid_request_error",
+        message="Stored thread history does not match the integrity fingerprint.",
+        error_code="thread_history_integrity_violation",
+    )
+
+
 def already_continued() -> ThreadError:
     return ThreadError(
         http_status=400,

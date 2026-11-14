@@ -117,7 +117,9 @@ Extension points: [docs/EXTENDING.md](docs/EXTENDING.md). Integration ideas: [do
 | Rule | Behavior |
 | --- | --- |
 | Create-only | `system`, `tools` only on create; present on continue → 400 |
-| Fingerprint | `model`, `tool_choice`, `thinking`, `cache_control`, `feature_flags` (from `betas`), `fallbacks`, `output_config`, `context_management` must match create → 400 `thread_fingerprint_mismatch` |
+| Fingerprint | `tool_choice`, `thinking`, `cache_control`, `feature_flags` (from `betas`), `fallbacks`, `output_config`, `context_management` must match create → 400 `thread_fingerprint_mismatch`. `model` is **not** part of the fingerprint. |
+| Model policy | `thread.model_policy` on create: `routed` (default) allows a different `model` each continue; `pinned` rejects changes → 400 `thread_model_policy_violation`. Legacy threads without v2 fingerprints behave as **pinned**. |
+| History integrity | Stored `messages` + `system` are hashed into `history_digest` in the fingerprint → 400 `thread_history_integrity_violation` if the store is tampered |
 | Append-only | Each response id continuable **once** → `thread_already_continued` |
 | Concurrency | Second continue while first runs → `thread_continue_in_flight` |
 | Missing / expired | 404 `thread_not_found` — **replay** with full history + new create |
@@ -138,7 +140,7 @@ Claude-shaped JSON body with a top-level `thread` object (`create` or `continue`
   "error": {
     "type": "invalid_request_error",
     "message": "...",
-    "details": { "error_code": "thread_fingerprint_mismatch", "mismatched_fields": ["model"] }
+    "details": { "error_code": "thread_fingerprint_mismatch", "mismatched_fields": ["cache_control"] }
   },
   "request_id": "req_..."
 }
