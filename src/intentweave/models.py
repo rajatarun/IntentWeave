@@ -1,6 +1,15 @@
 from dataclasses import dataclass, field
 from typing import Any
 
+from intentweave.fingerprint import is_legacy_fingerprint
+
+
+def _legacy_model_policy(item: dict[str, Any]) -> str:
+    fp = item.get("fingerprint_json") or {}
+    if is_legacy_fingerprint(fp):
+        return "pinned"
+    return "routed"
+
 
 @dataclass
 class ThreadRecord:
@@ -16,6 +25,9 @@ class ThreadRecord:
     model: str
     stop_reason: str
     assistant_message: dict[str, Any]
+    provider: str = "mock"
+    model_policy: str = "routed"
+    pinned_model: str | None = None
     continued: bool = False
     continue_in_flight: bool = False
     last_used_epoch: float = 0.0
@@ -33,6 +45,9 @@ class ThreadRecord:
             "tools": self.tools,
             "messages": self.messages,
             "model": self.model,
+            "provider": self.provider,
+            "model_policy": self.model_policy,
+            "pinned_model": self.pinned_model,
             "stop_reason": self.stop_reason,
             "assistant_message": self.assistant_message,
             "continued": self.continued,
@@ -54,6 +69,9 @@ class ThreadRecord:
             tools=item.get("tools"),
             messages=item.get("messages") or [],
             model=item["model"],
+            provider=item.get("provider") or "mock",
+            model_policy=item.get("model_policy") or _legacy_model_policy(item),
+            pinned_model=item.get("pinned_model"),
             stop_reason=item.get("stop_reason", "end_turn"),
             assistant_message=item.get("assistant_message") or {},
             continued=bool(item.get("continued")),

@@ -4,13 +4,24 @@ from intentweave.clock import Clock
 from intentweave.errors import (
     ThreadError,
     fingerprint_mismatch,
+    history_integrity_violation,
     invalid_request,
+    model_policy_violation,
     thread_not_found,
 )
-from intentweave.fingerprint import diff_fingerprints, extract_fingerprint
+from intentweave.fingerprint import (
+    attach_history_digest,
+    diff_fingerprints,
+    extract_fingerprint,
+    is_legacy_fingerprint,
+    legacy_model_mismatch,
+    verify_history_digest,
+)
 from intentweave.models import ProviderResult, ThreadRecord
 from intentweave.providers.base import MessageProvider
 from intentweave.store.base import ThreadStore
+
+_MODEL_POLICIES = frozenset({"pinned", "routed"})
 
 
 class ThreadService:
@@ -24,12 +35,14 @@ class ThreadService:
         *,
         soft_ttl_seconds: int = 300,
         hard_ttl_seconds: int = 3600,
+        provider_name: str = "mock",
     ) -> None:
         self._store = store
         self._provider = provider
         self._clock = clock
         self._soft_ttl = soft_ttl_seconds
         self._hard_ttl = hard_ttl_seconds
+        self._provider_name = provider_name
 
     def handle_messages(self, body: dict[str, Any]) -> dict[str, Any]:
         thread = body.get("thread")
@@ -38,7 +51,7 @@ class ThreadService:
 
         thread_type = thread.get("type")
         if thread_type == "create":
-            return self._create_thread(body)
+            return self._create_thread(body, thread)
         if thread_type == "continue":
             return self._continue_thread(body, thread)
         raise invalid_request("thread.type must be 'create' or 'continue'.")
@@ -57,10 +70,11 @@ class ThreadService:
         )
         return result.as_message_dict()
 
-    def _create_thread(self, body: dict[str, Any]) -> dict[str, Any]:
+    def _create_thread(self, body: dict[str, Any], thread: dict[str, Any]) -> dict[str, Any]:
         model = _require_str(body, "model")
         messages = _require_messages(body)
         max_tokens = int(body.get("max_tokens") or 1024)
+        model_policy = _resolve_model_policy(thread.get("model_policy"), default="routed")
         fingerprint = extract_fingerprint(body)
 
         result = self._provider.complete(
@@ -72,6 +86,12 @@ class ThreadService:
             request_meta={"thread": "create"},
         )
         now = self._clock.now()
+        full_messages = _append_assistant(messages, result, provider_name=self._provider_name)
+        fingerprint = attach_history_digest(
+            fingerprint,
+            system=body.get("system"),
+            messages=full_messages,
+        )
         record = _record_from_result(
             result=result,
             thread_id=result.response_id,
@@ -79,9 +99,12 @@ class ThreadService:
             fingerprint=fingerprint,
             system=body.get("system"),
             tools=body.get("tools"),
-            messages=_append_assistant(messages, result),
+            messages=full_messages,
             now=now,
             hard_ttl_seconds=self._hard_ttl,
+            provider_name=self._provider_name,
+            model_policy=model_policy,
+            pinned_model=model if model_policy == "pinned" else None,
         )
         self._store.put(record)
         return result.as_message_dict()
@@ -106,7 +129,21 @@ class ThreadService:
         try:
             self._assert_continuable(parent)
             self._assert_fresh(parent)
-            mismatched = diff_fingerprints(parent.fingerprint, incoming_fp)
+            if not verify_history_digest(
+                parent.fingerprint, system=parent.system, messages=parent.messages
+            ):
+                raise history_integrity_violation()
+
+            self._assert_model_policy(parent, model)
+
+            stored_fp = parent.fingerprint
+            if is_legacy_fingerprint(stored_fp) and legacy_model_mismatch(
+                stored_fp, model, self._provider_name
+            ):
+                pinned = stored_fp.get("model") or parent.pinned_model or parent.model
+                raise model_policy_violation(requested_model=model, pinned_model=str(pinned))
+
+            mismatched = diff_fingerprints(stored_fp, incoming_fp)
             if mismatched:
                 raise fingerprint_mismatch(mismatched)
 
@@ -137,17 +174,33 @@ class ThreadService:
                 },
             )
             now = self._clock.now()
+            full_messages = _append_assistant(
+                full_messages, result, provider_name=self._provider_name
+            )
+            child_fp = attach_history_digest(
+                dict(parent.fingerprint),
+                system=parent.system,
+                messages=full_messages,
+            )
+            # Drop legacy routing keys from stored fingerprint on first routed continue.
+            child_fp.pop("model", None)
+            child_fp.pop("provider", None)
+            if "fingerprint_version" not in child_fp:
+                child_fp["fingerprint_version"] = incoming_fp.get("fingerprint_version")
 
             child = _record_from_result(
                 result=result,
                 thread_id=parent.thread_id,
                 parent_response_id=previous_id,
-                fingerprint=parent.fingerprint,
+                fingerprint=child_fp,
                 system=parent.system,
                 tools=parent.tools,
-                messages=_append_assistant(full_messages, result),
+                messages=full_messages,
                 now=now,
                 hard_ttl_seconds=self._hard_ttl,
+                provider_name=self._provider_name,
+                model_policy=parent.model_policy,
+                pinned_model=parent.pinned_model,
             )
             self._store.finish_continue(
                 previous_id,
@@ -161,6 +214,13 @@ class ThreadService:
         except Exception:
             self._store.abort_continue(previous_id)
             raise
+
+    def _assert_model_policy(self, parent: ThreadRecord, requested_model: str) -> None:
+        if parent.model_policy != "pinned":
+            return
+        pinned = parent.pinned_model or parent.model
+        if requested_model != pinned:
+            raise model_policy_violation(requested_model=requested_model, pinned_model=pinned)
 
     def _assert_fresh(self, record: ThreadRecord) -> None:
         age = self._clock.now() - record.last_used_epoch
@@ -185,6 +245,9 @@ def _record_from_result(
     messages: list[dict[str, Any]],
     now: float,
     hard_ttl_seconds: int,
+    provider_name: str,
+    model_policy: str,
+    pinned_model: str | None,
 ) -> ThreadRecord:
     refused = result.stop_reason == "refusal"
     paused = result.stop_reason == "pause_turn"
@@ -198,6 +261,9 @@ def _record_from_result(
         tools=tools,
         messages=messages,
         model=result.model,
+        provider=provider_name,
+        model_policy=model_policy,
+        pinned_model=pinned_model,
         stop_reason=result.stop_reason,
         assistant_message=result.as_message_dict(),
         continued=False,
@@ -210,10 +276,20 @@ def _record_from_result(
 
 
 def _append_assistant(
-    messages: list[dict[str, Any]], result: ProviderResult
+    messages: list[dict[str, Any]],
+    result: ProviderResult,
+    *,
+    provider_name: str,
 ) -> list[dict[str, Any]]:
     out = list(messages)
-    out.append({"role": "assistant", "content": result.content})
+    out.append(
+        {
+            "role": "assistant",
+            "content": result.content,
+            "model": result.model,
+            "provider": provider_name,
+        }
+    )
     return out
 
 
@@ -229,3 +305,11 @@ def _require_messages(body: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(messages, list) or len(messages) == 0:
         raise invalid_request("messages must be a non-empty array for create.")
     return messages
+
+
+def _resolve_model_policy(value: Any | None, *, default: str) -> str:
+    if value is None:
+        return default
+    if not isinstance(value, str) or value not in _MODEL_POLICIES:
+        raise invalid_request("thread.model_policy must be 'pinned' or 'routed'.")
+    return value
