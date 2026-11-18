@@ -158,6 +158,11 @@ Returns `{"status":"ok"}`.
 | `THREAD_SOFT_TTL_SECONDS` | `300` | Soft expiry after last successful store |
 | `THREAD_HARD_TTL_SECONDS` | `3600` | DynamoDB TTL attribute horizon |
 | `INTENTWEAVE_PROVIDER` | `mock` | `mock` (default); `anthropic` / `bedrock` reserved (not implemented) |
+| `INTENTWEAVE_DECISIONS_LABELER` | off | Set to `1` to classify thread create/continue turns (optional response fields) |
+| `GEMINI_API_KEY` | _(unset)_ | Gemini Developer API key when decisions labeling is enabled |
+| `INTENTWEAVE_DECISIONS_MIN_CONFIDENCE` | `0.5` | Minimum Decisions API confidence before heuristic fallback |
+| `INTENTWEAVE_DECISIONS_TIMEOUT_S` | `1.5` | Decisions API call timeout (seconds) |
+| `OBSERVATORY_METRICS_TABLE` | _(unset)_ | Optional DynamoDB table for classification telemetry |
 | `LOG_LEVEL` | `INFO` | Log level |
 
 ## Local development

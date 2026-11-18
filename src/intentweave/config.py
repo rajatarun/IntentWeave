@@ -9,6 +9,20 @@ def _int_env(name: str, default: int) -> int:
     return int(raw)
 
 
+def _float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return float(raw)
+
+
+def _bool_env(name: str, *, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     """Runtime configuration from environment variables."""
@@ -18,6 +32,10 @@ class Settings:
     hard_ttl_seconds: int
     provider: str
     log_level: str
+    decisions_labeler_enabled: bool
+    gemini_api_key: str | None
+    decisions_min_confidence: float
+    decisions_timeout_s: float
 
     @classmethod
     def from_environ(cls) -> "Settings":
@@ -27,4 +45,8 @@ class Settings:
             hard_ttl_seconds=_int_env("THREAD_HARD_TTL_SECONDS", 3600),
             provider=(os.environ.get("INTENTWEAVE_PROVIDER") or "mock").lower(),
             log_level=os.environ.get("LOG_LEVEL", "INFO"),
+            decisions_labeler_enabled=_bool_env("INTENTWEAVE_DECISIONS_LABELER", default=False),
+            gemini_api_key=os.environ.get("GEMINI_API_KEY") or None,
+            decisions_min_confidence=_float_env("INTENTWEAVE_DECISIONS_MIN_CONFIDENCE", 0.5),
+            decisions_timeout_s=_float_env("INTENTWEAVE_DECISIONS_TIMEOUT_S", 1.5),
         )

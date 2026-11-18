@@ -17,7 +17,10 @@ from intentweave.fingerprint import (
     legacy_model_mismatch,
     verify_history_digest,
 )
+from intentweave.intent_labeler import IntentLabeler
+from intentweave.intent_labels import latest_user_text
 from intentweave.models import ProviderResult, ThreadRecord
+from intentweave.observatory import emit_intent_label_metric
 from intentweave.providers.base import MessageProvider
 from intentweave.store.base import ThreadStore
 
@@ -36,6 +39,7 @@ class ThreadService:
         soft_ttl_seconds: int = 300,
         hard_ttl_seconds: int = 3600,
         provider_name: str = "mock",
+        intent_labeler: IntentLabeler | None = None,
     ) -> None:
         self._store = store
         self._provider = provider
@@ -43,6 +47,7 @@ class ThreadService:
         self._soft_ttl = soft_ttl_seconds
         self._hard_ttl = hard_ttl_seconds
         self._provider_name = provider_name
+        self._intent_labeler = intent_labeler or IntentLabeler()
 
     def handle_messages(self, body: dict[str, Any]) -> dict[str, Any]:
         thread = body.get("thread")
@@ -107,7 +112,12 @@ class ThreadService:
             pinned_model=model if model_policy == "pinned" else None,
         )
         self._store.put(record)
-        return result.as_message_dict()
+        return self._with_intent_metadata(
+            result.as_message_dict(),
+            messages=messages,
+            model=model,
+            resume_pause=False,
+        )
 
     def _continue_thread(self, body: dict[str, Any], thread: dict[str, Any]) -> dict[str, Any]:
         if "system" in body or "tools" in body:
@@ -207,7 +217,13 @@ class ThreadService:
                 new_record=child,
                 mark_parent_continued=True,
             )
-            return result.as_message_dict()
+            return self._with_intent_metadata(
+                result.as_message_dict(),
+                messages=new_messages if new_messages else parent.messages,
+                model=model,
+                resume_pause=parent.paused and not new_messages,
+                trace_id=result.response_id,
+            )
         except ThreadError:
             self._store.abort_continue(previous_id)
             raise
@@ -232,6 +248,42 @@ class ThreadService:
             raise thread_not_found("Cannot continue after a refusal.")
         if record.stop_reason == "refusal":
             raise thread_not_found("Cannot continue after a refusal.")
+
+    def _with_intent_metadata(
+        self,
+        message: dict[str, Any],
+        *,
+        messages: list[dict[str, Any]],
+        model: str,
+        resume_pause: bool,
+        trace_id: str | None = None,
+    ) -> dict[str, Any]:
+        if not self._intent_labeler.enabled:
+            return message
+
+        labeling_messages = list(messages)
+        if resume_pause and not latest_user_text(labeling_messages):
+            labeling_messages = [{"role": "user", "content": "continue"}]
+
+        labeled = self._intent_labeler.label_thread_turn(
+            messages=labeling_messages,
+            resume_pause=resume_pause,
+        )
+        if labeled is None:
+            return message
+
+        emit_intent_label_metric(
+            trace_id=trace_id or message.get("id"),
+            label=labeled.label,
+            source=labeled.source,
+            confidence=labeled.confidence,
+            model=model,
+        )
+        out = dict(message)
+        out["intent_label"] = labeled.label
+        out["intent_decision_source"] = labeled.source
+        out["intent_confidence"] = round(labeled.confidence, 4)
+        return out
 
 
 def _record_from_result(
