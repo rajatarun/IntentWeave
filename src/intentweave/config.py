@@ -34,6 +34,8 @@ class Settings:
     log_level: str
     decisions_labeler_enabled: bool
     gemini_api_key: str | None
+    gemini_secret_name: str
+    gemini_secret_region: str
     decisions_min_confidence: float
     decisions_timeout_s: float
 
@@ -47,6 +49,8 @@ class Settings:
             log_level=os.environ.get("LOG_LEVEL", "INFO"),
             decisions_labeler_enabled=_bool_env("INTENTWEAVE_DECISIONS_LABELER", default=False),
             gemini_api_key=os.environ.get("GEMINI_API_KEY") or None,
+            gemini_secret_name=os.environ.get("GEMINI_SECRET_NAME") or "gemini/api_key",
+            gemini_secret_region=os.environ.get("GEMINI_SECRET_REGION") or "us-east-1",
             decisions_min_confidence=_float_env("INTENTWEAVE_DECISIONS_MIN_CONFIDENCE", 0.5),
             decisions_timeout_s=_float_env("INTENTWEAVE_DECISIONS_TIMEOUT_S", 1.5),
         )

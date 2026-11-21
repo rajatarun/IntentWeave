@@ -3,6 +3,7 @@
 from intentweave.api import lambda_handler as _route
 from intentweave.clock import SystemClock
 from intentweave.config import Settings
+from intentweave.gemini_credentials import resolve_gemini_api_key
 from intentweave.intent_labeler import IntentLabeler
 from intentweave.providers.registry import get_provider
 from intentweave.service import ThreadService
@@ -18,9 +19,16 @@ if _settings.threads_table_name:
 else:
     _store = MemoryThreadStore()
 
+_gemini_api_key = _settings.gemini_api_key
+if _settings.decisions_labeler_enabled and not _gemini_api_key:
+    _gemini_api_key = resolve_gemini_api_key(
+        secret_name=_settings.gemini_secret_name,
+        secret_region=_settings.gemini_secret_region,
+    )
+
 _intent_labeler = IntentLabeler(
     decisions_enabled=_settings.decisions_labeler_enabled,
-    gemini_api_key=_settings.gemini_api_key,
+    gemini_api_key=_gemini_api_key,
     timeout_s=_settings.decisions_timeout_s,
     min_confidence=_settings.decisions_min_confidence,
 )

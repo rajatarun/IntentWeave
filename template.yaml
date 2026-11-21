@@ -27,6 +27,12 @@ Parameters:
     AllowedValues: [mock, anthropic, bedrock]
     Description: LLM provider adapter (mock needs no API keys).
 
+  IntentWeaveDecisionsLabeler:
+    Type: String
+    Default: "0"
+    AllowedValues: ["0", "1"]
+    Description: Set to 1 to enable Gemini Decisions intent labeling on thread turns.
+
   LambdaMemoryMB:
     Type: Number
     Default: 256
@@ -80,9 +86,19 @@ Resources:
       CodeUri: src/
       Handler: handler.lambda_handler
       Description: IntentWeave /v1/messages thread router
+      Environment:
+        Variables:
+          INTENTWEAVE_DECISIONS_LABELER: !Ref IntentWeaveDecisionsLabeler
+          GEMINI_SECRET_NAME: gemini/api_key
+          GEMINI_SECRET_REGION: us-east-1
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref ThreadsTable
+        - Statement:
+            - Sid: GeminiApiKeySecretRead
+              Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:us-east-1:${AWS::AccountId}:secret:gemini/api_key-*"
       Events:
         Health:
           Type: HttpApi

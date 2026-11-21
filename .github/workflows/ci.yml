@@ -107,6 +107,7 @@ jobs:
               ThreadSoftTtlSeconds=300 \
               ThreadHardTtlSeconds=3600 \
               IntentWeaveProvider=mock \
+              IntentWeaveDecisionsLabeler=${{ vars.INTENTWEAVE_DECISIONS_LABELER || '0' }} \
               LambdaMemoryMB=256 \
               LogRetentionDays=14
 

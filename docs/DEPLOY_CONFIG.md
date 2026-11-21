@@ -15,6 +15,14 @@ IntentWeave’s **Deploy prod (SAM)** job in [.github/workflows/ci.yml](../.gith
 | `AWS_REGION` | Region for SAM deploy, stack describe, and smoke tests | `us-east-1` |
 | `AWS_STACK_NAME` | CloudFormation stack name (also used for deploy concurrency group) | `intentweave-prod` |
 
+## Optional variables
+
+| Name | Purpose | Default when unset |
+| --- | --- | --- |
+| `INTENTWEAVE_DECISIONS_LABELER` | Passes `IntentWeaveDecisionsLabeler` to SAM (`1` enables Gemini Decisions labeling) | `0` (off) |
+
+See [.claude/decisions-enable.md](../.claude/decisions-enable.md) for enablement and rollback.
+
 ## Local / SAM parameters
 
 Local deploys use `sam deploy --guided` and are not tied to the GitHub values above. Stack outputs use standard pseudo-parameters (`AWS::Region`, stack name) from `template.yaml`; no account-specific defaults are committed in the template.
