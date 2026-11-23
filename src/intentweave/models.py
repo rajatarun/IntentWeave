@@ -34,9 +34,12 @@ class ThreadRecord:
     ttl_epoch: int = 0
     refused: bool = False
     paused: bool = False
+    parent_thread_id: str | None = None
+    parent_turn: int | None = None
+    parent_digest: str | None = None
 
     def to_item(self) -> dict[str, Any]:
-        return {
+        item: dict[str, Any] = {
             "response_id": self.response_id,
             "thread_id": self.thread_id,
             "parent_response_id": self.parent_response_id,
@@ -57,9 +60,18 @@ class ThreadRecord:
             "refused": self.refused,
             "paused": self.paused,
         }
+        if self.parent_thread_id is not None:
+            item["parent_thread_id"] = self.parent_thread_id
+        if self.parent_turn is not None:
+            item["parent_turn"] = self.parent_turn
+        if self.parent_digest is not None:
+            item["parent_digest"] = self.parent_digest
+        return item
 
     @classmethod
     def from_item(cls, item: dict[str, Any]) -> "ThreadRecord":
+        parent_turn_raw = item.get("parent_turn")
+        parent_turn = int(parent_turn_raw) if parent_turn_raw is not None else None
         return cls(
             response_id=item["response_id"],
             thread_id=item["thread_id"],
@@ -80,6 +92,9 @@ class ThreadRecord:
             ttl_epoch=int(item.get("ttl", 0)),
             refused=bool(item.get("refused")),
             paused=bool(item.get("paused")),
+            parent_thread_id=item.get("parent_thread_id"),
+            parent_turn=parent_turn,
+            parent_digest=item.get("parent_digest"),
         )
 
 

@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 from intentweave.clock import Clock
@@ -23,6 +24,7 @@ from intentweave.models import ProviderResult, ThreadRecord
 from intentweave.observatory import emit_intent_label_metric
 from intentweave.providers.base import MessageProvider
 from intentweave.store.base import ThreadStore
+from intentweave.store.sqlite import build_forked_records, order_thread_records
 
 _MODEL_POLICIES = frozenset({"pinned", "routed"})
 
@@ -211,6 +213,9 @@ class ThreadService:
                 provider_name=self._provider_name,
                 model_policy=parent.model_policy,
                 pinned_model=parent.pinned_model,
+                parent_thread_id=parent.parent_thread_id,
+                parent_turn=parent.parent_turn,
+                parent_digest=parent.parent_digest,
             )
             self._store.finish_continue(
                 previous_id,
@@ -285,6 +290,53 @@ class ThreadService:
         out["intent_confidence"] = round(labeled.confidence, 4)
         return out
 
+    def fork_thread(
+        self,
+        source_thread_id: str,
+        *,
+        new_thread_id: str | None = None,
+        up_to_turn: int | None = None,
+    ) -> dict[str, Any]:
+        """Fork turns ``0..up_to_turn`` into a new thread with cryptographic lineage."""
+        if hasattr(self._store, "fork_thread"):
+            return self._store.fork_thread(
+                source_thread_id,
+                new_thread_id=new_thread_id,
+                up_to_turn=up_to_turn,
+            )
+
+        records = _load_thread_records(self._store, source_thread_id)
+        if not records:
+            raise thread_not_found(f"Thread '{source_thread_id}' not found.")
+
+        ordered = order_thread_records(records)
+        forked_records, summary = build_forked_records(
+            ordered,
+            new_thread_id=new_thread_id,
+            up_to_turn=up_to_turn,
+        )
+        target_tid = summary["thread_id"]
+        if _load_thread_records(self._store, target_tid):
+            raise invalid_request(f"Target thread_id '{target_tid}' already exists.")
+        for rec in forked_records:
+            self._store.put(rec)
+        return summary
+
+    def export_context_blocks(
+        self,
+        thread_id: str,
+        *,
+        max_turns: int = 10,
+        base_priority: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Export recent thread messages as PromptWeave-compatible ContextBlock dicts."""
+        return export_thread_context_blocks(
+            self._store,
+            thread_id,
+            max_turns=max_turns,
+            base_priority=base_priority,
+        )
+
 
 def _record_from_result(
     *,
@@ -300,6 +352,9 @@ def _record_from_result(
     provider_name: str,
     model_policy: str,
     pinned_model: str | None,
+    parent_thread_id: str | None = None,
+    parent_turn: int | None = None,
+    parent_digest: str | None = None,
 ) -> ThreadRecord:
     refused = result.stop_reason == "refusal"
     paused = result.stop_reason == "pause_turn"
@@ -324,6 +379,9 @@ def _record_from_result(
         ttl_epoch=ttl_epoch,
         refused=refused,
         paused=paused,
+        parent_thread_id=parent_thread_id,
+        parent_turn=parent_turn,
+        parent_digest=parent_digest,
     )
 
 
@@ -365,3 +423,75 @@ def _resolve_model_policy(value: Any | None, *, default: str) -> str:
     if not isinstance(value, str) or value not in _MODEL_POLICIES:
         raise invalid_request("thread.model_policy must be 'pinned' or 'routed'.")
     return value
+
+
+def _load_thread_records(store: Any, thread_id: str) -> list[ThreadRecord]:
+    if not hasattr(store, "list_by_thread"):
+        raise invalid_request("Configured thread store does not support listing thread records.")
+    records = list(store.list_by_thread(thread_id))
+    if not records:
+        single = store.get(thread_id)
+        if single is not None:
+            records = list(store.list_by_thread(single.thread_id))
+    return records
+
+
+def _extract_message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                if isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                else:
+                    parts.append(json.dumps(item, sort_keys=True))
+            else:
+                parts.append(str(item))
+        return "\n".join(parts)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def export_thread_context_blocks(
+    store: Any,
+    thread_id: str,
+    *,
+    max_turns: int = 10,
+    base_priority: int = 50,
+) -> list[dict[str, Any]]:
+    """Export recent messages from a thread as PromptWeave-compatible context_blocks.
+
+    Returns a list of ``{"label": f"turn_{i}_{role}", "content": ..., "priority": ...}``
+    dicts with strictly increasing priority for more recent turns.
+    """
+    if max_turns <= 0:
+        raise invalid_request("max_turns must be a positive integer.")
+
+    records = _load_thread_records(store, thread_id)
+    if not records:
+        raise thread_not_found(f"Thread '{thread_id}' not found.")
+
+    ordered = order_thread_records(records)
+    leaf = ordered[-1]
+    messages = list(leaf.messages)
+    start_idx = max(0, len(messages) - max_turns)
+    selected = messages[start_idx:]
+
+    blocks: list[dict[str, Any]] = []
+    for offset, msg in enumerate(selected):
+        turn_index = start_idx + offset
+        role = str(msg.get("role") or "unknown")
+        content = _extract_message_text(msg.get("content"))
+        blocks.append(
+            {
+                "label": f"turn_{turn_index}_{role}",
+                "content": content,
+                "priority": base_priority + offset,
+            }
+        )
+    return blocks

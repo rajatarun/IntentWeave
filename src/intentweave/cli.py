@@ -9,8 +9,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from intentweave.errors import ThreadError
 from intentweave.fingerprint import history_digest
 from intentweave.models import ThreadRecord
+from intentweave.service import export_thread_context_blocks
 from intentweave.store.sqlite import SQLiteThreadStore
 
 
@@ -149,6 +151,55 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit machine-readable JSON output.",
     )
+
+    fork_cmd = sub.add_parser(
+        "fork",
+        help="Cryptographically fork a thread up to a specific turn.",
+    )
+    fork_cmd.add_argument("--db", required=True, help="Path to SQLiteThreadStore database file.")
+    fork_cmd.add_argument("--thread-id", required=True, help="Source thread ID (or response ID).")
+    fork_cmd.add_argument(
+        "--up-to-turn",
+        type=int,
+        default=None,
+        help="0-based turn index to fork through (defaults to latest turn).",
+    )
+    fork_cmd.add_argument(
+        "--new-thread-id",
+        default=None,
+        help="Optional explicit thread_id for the forked child thread.",
+    )
+    fork_cmd.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Emit machine-readable JSON output.",
+    )
+
+    export_cmd = sub.add_parser(
+        "export-context",
+        help="Export thread messages as PromptWeave-compatible context_blocks JSON.",
+    )
+    export_cmd.add_argument("--db", required=True, help="Path to SQLiteThreadStore database file.")
+    export_cmd.add_argument("--thread-id", required=True, help="Thread ID (or response ID).")
+    export_cmd.add_argument(
+        "--max-turns",
+        type=int,
+        default=10,
+        help="Maximum number of recent messages to export (default: 10).",
+    )
+    export_cmd.add_argument(
+        "--base-priority",
+        type=int,
+        default=50,
+        help="Base priority assigned to the oldest exported message (default: 50).",
+    )
+    export_cmd.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Emit machine-readable JSON output (default format).",
+    )
     return parser
 
 
@@ -171,6 +222,56 @@ def main(argv: list[str] | None = None) -> int:
             for err in result.errors:
                 print(f"  - {err}", file=sys.stderr)
         return 0 if result.valid else 1
+
+    if args.command == "fork":
+        path = Path(args.db)
+        if not path.exists():
+            print(f"Error: database file not found: {path}", file=sys.stderr)
+            return 1
+        store = SQLiteThreadStore(path)
+        try:
+            summary = store.fork_thread(
+                args.thread_id,
+                new_thread_id=args.new_thread_id,
+                up_to_turn=args.up_to_turn,
+            )
+        except ThreadError as exc:
+            print(f"Error: {exc.message}", file=sys.stderr)
+            return 1
+        finally:
+            store.close()
+
+        if args.as_json:
+            print(json.dumps(summary, indent=2))
+        else:
+            print(
+                f"FORKED: '{summary['parent_thread_id']}' (turn {summary['parent_turn']}) -> "
+                f"'{summary['thread_id']}' ({summary['turns_copied']} turn(s), "
+                f"head={summary['head_response_id']})"
+            )
+        return 0
+
+    if args.command == "export-context":
+        path = Path(args.db)
+        if not path.exists():
+            print(f"Error: database file not found: {path}", file=sys.stderr)
+            return 1
+        store = SQLiteThreadStore(path)
+        try:
+            blocks = export_thread_context_blocks(
+                store,
+                args.thread_id,
+                max_turns=args.max_turns,
+                base_priority=args.base_priority,
+            )
+        except ThreadError as exc:
+            print(f"Error: {exc.message}", file=sys.stderr)
+            return 1
+        finally:
+            store.close()
+
+        print(json.dumps(blocks, indent=2))
+        return 0
 
     return 2
 

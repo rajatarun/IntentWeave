@@ -14,6 +14,13 @@ class MemoryThreadStore:
             return None
         return ThreadRecord.from_item(rec.to_item())
 
+    def list_by_thread(self, thread_id: str) -> list[ThreadRecord]:
+        return [
+            ThreadRecord.from_item(rec.to_item())
+            for rec in self._items.values()
+            if rec.thread_id == thread_id
+        ]
+
     def put(self, record: ThreadRecord) -> None:
         self._items[record.response_id] = ThreadRecord.from_item(record.to_item())
 
