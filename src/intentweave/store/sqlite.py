@@ -62,6 +62,17 @@ class SQLiteThreadStore:
         with self._lock:
             return self._read_unlocked(response_id)
 
+    def list_by_thread(self, thread_id: str) -> list[ThreadRecord]:
+        """Return all stored turn records belonging to ``thread_id``."""
+        with self._lock:
+            rows = self._conn.execute("SELECT item_json FROM intent_threads").fetchall()
+        records: list[ThreadRecord] = []
+        for row in rows:
+            item = json.loads(row["item_json"])
+            if item.get("thread_id") == thread_id:
+                records.append(ThreadRecord.from_item(item))
+        return records
+
     def put(self, record: ThreadRecord) -> None:
         with self._lock:
             self._write_unlocked(record)

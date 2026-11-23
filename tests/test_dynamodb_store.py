@@ -1,10 +1,11 @@
-import boto3
-import moto
 import pytest
 
 from intentweave.errors import ThreadError
 from intentweave.models import ThreadRecord
 from intentweave.store.dynamodb import DynamoDBThreadStore
+
+boto3 = pytest.importorskip("boto3")
+moto = pytest.importorskip("moto")
 
 
 @pytest.fixture

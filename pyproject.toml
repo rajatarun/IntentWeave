@@ -16,6 +16,9 @@ aws = ["boto3>=1.35.0,<2"]
 decisions = ["google-genai>=3.2.0,<4"]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 
+[project.scripts]
+intentweave = "intentweave.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/intentweave"]
 
