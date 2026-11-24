@@ -2,6 +2,7 @@ import json
 from typing import Any
 
 from intentweave.clock import Clock
+from intentweave.compaction import build_checkpoint, select_post_checkpoint_messages
 from intentweave.errors import (
     ThreadError,
     fingerprint_mismatch,
@@ -322,12 +323,55 @@ class ThreadService:
             self._store.put(rec)
         return summary
 
+    def create_checkpoint(
+        self,
+        thread_id: str,
+        *,
+        summary_text: str,
+        up_to_turn: int | None = None,
+    ) -> dict[str, Any]:
+        """Create a cryptographic compaction checkpoint covering turns ``0..up_to_turn``."""
+        if hasattr(self._store, "create_checkpoint"):
+            return self._store.create_checkpoint(
+                thread_id,
+                summary_text=summary_text,
+                up_to_turn=up_to_turn,
+            )
+
+        records = _load_thread_records(self._store, thread_id)
+        if not records:
+            raise thread_not_found(f"Thread '{thread_id}' not found.")
+
+        ordered = order_thread_records(records)
+        checkpoint = build_checkpoint(
+            ordered,
+            summary_text=summary_text,
+            up_to_turn=up_to_turn,
+        )
+        payload = checkpoint.to_dict()
+        if hasattr(self._store, "put_checkpoint"):
+            self._store.put_checkpoint(payload)
+        return payload
+
+    def list_checkpoints(self, thread_id: str) -> list[dict[str, Any]]:
+        """List compaction checkpoints recorded for ``thread_id``."""
+        if hasattr(self._store, "list_checkpoints"):
+            return list(self._store.list_checkpoints(thread_id))
+        return []
+
+    def get_latest_checkpoint(self, thread_id: str) -> dict[str, Any] | None:
+        """Return the latest compaction checkpoint for ``thread_id``, if any."""
+        if hasattr(self._store, "get_latest_checkpoint"):
+            return self._store.get_latest_checkpoint(thread_id)
+        return None
+
     def export_context_blocks(
         self,
         thread_id: str,
         *,
         max_turns: int = 10,
         base_priority: int = 50,
+        from_checkpoint: bool = False,
     ) -> list[dict[str, Any]]:
         """Export recent thread messages as PromptWeave-compatible ContextBlock dicts."""
         return export_thread_context_blocks(
@@ -335,6 +379,7 @@ class ThreadService:
             thread_id,
             max_turns=max_turns,
             base_priority=base_priority,
+            from_checkpoint=from_checkpoint,
         )
 
 
@@ -463,11 +508,16 @@ def export_thread_context_blocks(
     *,
     max_turns: int = 10,
     base_priority: int = 50,
+    from_checkpoint: bool = False,
 ) -> list[dict[str, Any]]:
     """Export recent messages from a thread as PromptWeave-compatible context_blocks.
 
     Returns a list of ``{"label": f"turn_{i}_{role}", "content": ..., "priority": ...}``
     dicts with strictly increasing priority for more recent turns.
+
+    When ``from_checkpoint=True`` and a compaction checkpoint exists for the thread,
+    emits a single high-priority ``checkpoint_summary`` block followed only by turns
+    strictly after ``checkpoint["up_to_turn"]``.
     """
     if max_turns <= 0:
         raise invalid_request("max_turns must be a positive integer.")
@@ -477,12 +527,41 @@ def export_thread_context_blocks(
         raise thread_not_found(f"Thread '{thread_id}' not found.")
 
     ordered = order_thread_records(records)
+    canonical_thread_id = ordered[0].thread_id
+
+    if from_checkpoint and hasattr(store, "get_latest_checkpoint"):
+        checkpoint = store.get_latest_checkpoint(canonical_thread_id)
+        if checkpoint is not None:
+            post_messages = select_post_checkpoint_messages(ordered, checkpoint)
+            selected_pairs = (
+                post_messages[-max_turns:] if len(post_messages) > max_turns else post_messages
+            )
+            summary_priority = base_priority + len(selected_pairs) + 10
+            blocks: list[dict[str, Any]] = [
+                {
+                    "label": "checkpoint_summary",
+                    "content": str(checkpoint["summary_text"]),
+                    "priority": summary_priority,
+                }
+            ]
+            for offset, (turn_index, msg) in enumerate(selected_pairs):
+                role = str(msg.get("role") or "unknown")
+                content = _extract_message_text(msg.get("content"))
+                blocks.append(
+                    {
+                        "label": f"turn_{turn_index}_{role}",
+                        "content": content,
+                        "priority": base_priority + offset,
+                    }
+                )
+            return blocks
+
     leaf = ordered[-1]
     messages = list(leaf.messages)
     start_idx = max(0, len(messages) - max_turns)
     selected = messages[start_idx:]
 
-    blocks: list[dict[str, Any]] = []
+    blocks = []
     for offset, msg in enumerate(selected):
         turn_index = start_idx + offset
         role = str(msg.get("role") or "unknown")

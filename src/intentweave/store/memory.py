@@ -1,3 +1,5 @@
+from typing import Any
+
 from intentweave.errors import already_continued, continue_in_flight, thread_not_found
 from intentweave.models import ThreadRecord
 
@@ -7,6 +9,7 @@ class MemoryThreadStore:
 
     def __init__(self) -> None:
         self._items: dict[str, ThreadRecord] = {}
+        self._checkpoints: list[dict[str, Any]] = []
 
     def get(self, response_id: str) -> ThreadRecord | None:
         rec = self._items.get(response_id)
@@ -23,6 +26,28 @@ class MemoryThreadStore:
 
     def put(self, record: ThreadRecord) -> None:
         self._items[record.response_id] = ThreadRecord.from_item(record.to_item())
+
+    def put_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        self._checkpoints = [
+            c for c in self._checkpoints if c["checkpoint_id"] != checkpoint["checkpoint_id"]
+        ]
+        self._checkpoints.append(dict(checkpoint))
+
+    def list_checkpoints(self, thread_id: str) -> list[dict[str, Any]]:
+        resolved = thread_id
+        if not self.list_by_thread(thread_id):
+            single = self.get(thread_id)
+            if single is not None:
+                resolved = single.thread_id
+        matched = [dict(c) for c in self._checkpoints if c["thread_id"] == resolved]
+        matched.sort(key=lambda c: int(c["up_to_turn"]))
+        return matched
+
+    def get_latest_checkpoint(self, thread_id: str) -> dict[str, Any] | None:
+        matched = self.list_checkpoints(thread_id)
+        if not matched:
+            return None
+        return matched[-1]
 
     def try_begin_continue(self, response_id: str) -> ThreadRecord:
         rec = self.get(response_id)

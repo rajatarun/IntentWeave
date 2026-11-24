@@ -195,10 +195,40 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Base priority assigned to the oldest exported message (default: 50).",
     )
     export_cmd.add_argument(
+        "--from-checkpoint",
+        action="store_true",
+        default=False,
+        help="Emit latest checkpoint summary followed only by post-checkpoint turns.",
+    )
+    export_cmd.add_argument(
         "--json",
         dest="as_json",
         action="store_true",
         help="Emit machine-readable JSON output (default format).",
+    )
+
+    ckpt_cmd = sub.add_parser(
+        "checkpoint",
+        help="Create a cryptographic compaction checkpoint for a thread.",
+    )
+    ckpt_cmd.add_argument("--db", required=True, help="Path to SQLiteThreadStore database file.")
+    ckpt_cmd.add_argument("--thread-id", required=True, help="Thread ID (or response ID).")
+    ckpt_cmd.add_argument(
+        "--summary",
+        required=True,
+        help="Summary text representing turns covered by this checkpoint.",
+    )
+    ckpt_cmd.add_argument(
+        "--up-to-turn",
+        type=int,
+        default=None,
+        help="0-based turn index covered by the checkpoint (defaults to latest turn).",
+    )
+    ckpt_cmd.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Emit machine-readable JSON output.",
     )
     return parser
 
@@ -263,6 +293,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.thread_id,
                 max_turns=args.max_turns,
                 base_priority=args.base_priority,
+                from_checkpoint=args.from_checkpoint,
             )
         except ThreadError as exc:
             print(f"Error: {exc.message}", file=sys.stderr)
@@ -271,6 +302,34 @@ def main(argv: list[str] | None = None) -> int:
             store.close()
 
         print(json.dumps(blocks, indent=2))
+        return 0
+
+    if args.command == "checkpoint":
+        path = Path(args.db)
+        if not path.exists():
+            print(f"Error: database file not found: {path}", file=sys.stderr)
+            return 1
+        store = SQLiteThreadStore(path)
+        try:
+            checkpoint = store.create_checkpoint(
+                args.thread_id,
+                summary_text=args.summary,
+                up_to_turn=args.up_to_turn,
+            )
+        except ThreadError as exc:
+            print(f"Error: {exc.message}", file=sys.stderr)
+            return 1
+        finally:
+            store.close()
+
+        if args.as_json:
+            print(json.dumps(checkpoint, indent=2))
+        else:
+            print(
+                f"CHECKPOINT: '{checkpoint['checkpoint_id']}' thread='{checkpoint['thread_id']}' "
+                f"up_to_turn={checkpoint['up_to_turn']} "
+                f"digest={checkpoint['covered_digest'][:16]}..."
+            )
         return 0
 
     return 2

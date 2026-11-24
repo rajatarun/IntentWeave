@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from intentweave.compaction import build_checkpoint
 from intentweave.errors import (
     already_continued,
     continue_in_flight,
@@ -155,6 +156,24 @@ class SQLiteThreadStore:
                 )
                 """
             )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS thread_checkpoints (
+                    checkpoint_id TEXT PRIMARY KEY,
+                    thread_id TEXT NOT NULL,
+                    up_to_turn INTEGER NOT NULL,
+                    covered_digest TEXT NOT NULL,
+                    summary_text TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_thread_checkpoints_thread_turn
+                ON thread_checkpoints (thread_id, up_to_turn DESC, created_at DESC)
+                """
+            )
             self._conn.commit()
 
     def close(self) -> None:
@@ -243,6 +262,147 @@ class SQLiteThreadStore:
                 if self._conn.in_transaction:
                     self._conn.rollback()
                 raise
+
+    def _resolve_thread_id_unlocked(self, thread_id: str) -> str:
+        if self._list_by_thread_unlocked(thread_id):
+            return thread_id
+        single = self._read_unlocked(thread_id)
+        if single is not None:
+            return single.thread_id
+        return thread_id
+
+    @staticmethod
+    def _row_to_checkpoint(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "checkpoint_id": row["checkpoint_id"],
+            "thread_id": row["thread_id"],
+            "up_to_turn": int(row["up_to_turn"]),
+            "covered_digest": row["covered_digest"],
+            "summary_text": row["summary_text"],
+            "created_at": row["created_at"],
+        }
+
+    def put_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        """Persist a compaction checkpoint record in ``thread_checkpoints``."""
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO thread_checkpoints (
+                    checkpoint_id,
+                    thread_id,
+                    up_to_turn,
+                    covered_digest,
+                    summary_text,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(checkpoint_id) DO UPDATE SET
+                    thread_id = excluded.thread_id,
+                    up_to_turn = excluded.up_to_turn,
+                    covered_digest = excluded.covered_digest,
+                    summary_text = excluded.summary_text,
+                    created_at = excluded.created_at
+                """,
+                (
+                    checkpoint["checkpoint_id"],
+                    checkpoint["thread_id"],
+                    int(checkpoint["up_to_turn"]),
+                    checkpoint["covered_digest"],
+                    checkpoint["summary_text"],
+                    checkpoint["created_at"],
+                ),
+            )
+            self._conn.commit()
+
+    def create_checkpoint(
+        self,
+        thread_id: str,
+        *,
+        summary_text: str,
+        up_to_turn: int | None = None,
+    ) -> dict[str, Any]:
+        """Atomically create and persist a cryptographic compaction checkpoint."""
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                records = self._list_by_thread_unlocked(thread_id)
+                if not records:
+                    single = self._read_unlocked(thread_id)
+                    if single is not None:
+                        records = self._list_by_thread_unlocked(single.thread_id)
+                if not records:
+                    self._conn.rollback()
+                    raise thread_not_found(f"Thread '{thread_id}' not found.")
+
+                ordered = order_thread_records(records)
+                checkpoint = build_checkpoint(
+                    ordered,
+                    summary_text=summary_text,
+                    up_to_turn=up_to_turn,
+                )
+                payload = checkpoint.to_dict()
+                self._conn.execute(
+                    """
+                    INSERT INTO thread_checkpoints (
+                        checkpoint_id,
+                        thread_id,
+                        up_to_turn,
+                        covered_digest,
+                        summary_text,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        payload["checkpoint_id"],
+                        payload["thread_id"],
+                        payload["up_to_turn"],
+                        payload["covered_digest"],
+                        payload["summary_text"],
+                        payload["created_at"],
+                    ),
+                )
+                self._conn.commit()
+                return payload
+            except Exception:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    def list_checkpoints(self, thread_id: str) -> list[dict[str, Any]]:
+        """Return all compaction checkpoints for ``thread_id`` ordered by turn."""
+        with self._lock:
+            resolved_tid = self._resolve_thread_id_unlocked(thread_id)
+            rows = self._conn.execute(
+                """
+                SELECT checkpoint_id, thread_id, up_to_turn, covered_digest,
+                       summary_text, created_at
+                FROM thread_checkpoints
+                WHERE thread_id = ?
+                ORDER BY up_to_turn ASC, rowid ASC
+                """,
+                (resolved_tid,),
+            ).fetchall()
+            return [self._row_to_checkpoint(row) for row in rows]
+
+    def get_latest_checkpoint(self, thread_id: str) -> dict[str, Any] | None:
+        """Return the checkpoint covering the highest turn index for ``thread_id``."""
+        with self._lock:
+            resolved_tid = self._resolve_thread_id_unlocked(thread_id)
+            row = self._conn.execute(
+                """
+                SELECT checkpoint_id, thread_id, up_to_turn, covered_digest,
+                       summary_text, created_at
+                FROM thread_checkpoints
+                WHERE thread_id = ?
+                ORDER BY up_to_turn DESC, rowid DESC
+                LIMIT 1
+                """,
+                (resolved_tid,),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_checkpoint(row)
 
     def try_begin_continue(self, response_id: str) -> ThreadRecord:
         with self._lock:
