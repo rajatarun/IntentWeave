@@ -11,6 +11,7 @@ from typing import Any
 
 from intentweave.errors import ThreadError
 from intentweave.fingerprint import history_digest
+from intentweave.merge import diff_threads
 from intentweave.models import ThreadRecord
 from intentweave.service import export_thread_context_blocks
 from intentweave.store.sqlite import SQLiteThreadStore
@@ -230,6 +231,20 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit machine-readable JSON output.",
     )
+
+    diff_cmd = sub.add_parser(
+        "diff-threads",
+        help="Compare two thread branches (common prefix, diverged turns, intent shifts).",
+    )
+    diff_cmd.add_argument("--db", required=True, help="Path to SQLiteThreadStore database file.")
+    diff_cmd.add_argument("--thread-a", required=True, help="First thread ID (or response ID).")
+    diff_cmd.add_argument("--thread-b", required=True, help="Second thread ID (or response ID).")
+    diff_cmd.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Emit machine-readable JSON output.",
+    )
     return parser
 
 
@@ -329,6 +344,32 @@ def main(argv: list[str] | None = None) -> int:
                 f"CHECKPOINT: '{checkpoint['checkpoint_id']}' thread='{checkpoint['thread_id']}' "
                 f"up_to_turn={checkpoint['up_to_turn']} "
                 f"digest={checkpoint['covered_digest'][:16]}..."
+            )
+        return 0
+
+    if args.command == "diff-threads":
+        path = Path(args.db)
+        if not path.exists():
+            print(f"Error: database file not found: {path}", file=sys.stderr)
+            return 1
+        store = SQLiteThreadStore(path)
+        try:
+            diff = diff_threads(store, args.thread_a, args.thread_b)
+        except ThreadError as exc:
+            print(f"Error: {exc.message}", file=sys.stderr)
+            return 1
+        finally:
+            store.close()
+
+        if args.as_json:
+            print(json.dumps(diff, indent=2))
+        else:
+            print(
+                f"DIFF: '{diff['thread_a_id']}' ({diff['thread_a_turns']} turn(s)) vs "
+                f"'{diff['thread_b_id']}' ({diff['thread_b_turns']} turn(s)) | "
+                f"common_prefix={diff['common_prefix_turns']} "
+                f"only_in_a={len(diff['only_in_a'])} only_in_b={len(diff['only_in_b'])} "
+                f"intent_shifts={len(diff['intent_shifts'])}"
             )
         return 0
 

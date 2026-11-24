@@ -37,6 +37,7 @@ class ThreadRecord:
     parent_thread_id: str | None = None
     parent_turn: int | None = None
     parent_digest: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_item(self) -> dict[str, Any]:
         item: dict[str, Any] = {
@@ -66,12 +67,16 @@ class ThreadRecord:
             item["parent_turn"] = self.parent_turn
         if self.parent_digest is not None:
             item["parent_digest"] = self.parent_digest
+        if self.metadata:
+            item["metadata"] = self.metadata
         return item
 
     @classmethod
     def from_item(cls, item: dict[str, Any]) -> "ThreadRecord":
         parent_turn_raw = item.get("parent_turn")
         parent_turn = int(parent_turn_raw) if parent_turn_raw is not None else None
+        raw_metadata = item.get("metadata")
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
         return cls(
             response_id=item["response_id"],
             thread_id=item["thread_id"],
@@ -95,6 +100,7 @@ class ThreadRecord:
             parent_thread_id=item.get("parent_thread_id"),
             parent_turn=parent_turn,
             parent_digest=item.get("parent_digest"),
+            metadata=metadata,
         )
 
 

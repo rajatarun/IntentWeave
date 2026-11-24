@@ -21,6 +21,7 @@ from intentweave.fingerprint import (
 )
 from intentweave.intent_labeler import IntentLabeler
 from intentweave.intent_labels import latest_user_text
+from intentweave.merge import diff_threads, merge_thread_turns
 from intentweave.models import ProviderResult, ThreadRecord
 from intentweave.observatory import emit_intent_label_metric
 from intentweave.providers.base import MessageProvider
@@ -380,6 +381,25 @@ class ThreadService:
             max_turns=max_turns,
             base_priority=base_priority,
             from_checkpoint=from_checkpoint,
+        )
+
+    def diff_threads(self, thread_a_id: str, thread_b_id: str) -> dict[str, Any]:
+        """Compare two thread branches for common prefix, diverged turns, and intent shifts."""
+        return diff_threads(self._store, thread_a_id, thread_b_id)
+
+    def merge_thread_turns(
+        self,
+        *,
+        source_thread_id: str,
+        target_thread_id: str,
+        turn_indices: list[int] | None = None,
+    ) -> dict[str, Any]:
+        """Cryptographically merge diverged or selected turns from source onto target thread."""
+        return merge_thread_turns(
+            self,
+            source_thread_id=source_thread_id,
+            target_thread_id=target_thread_id,
+            turn_indices=turn_indices,
         )
 
 
