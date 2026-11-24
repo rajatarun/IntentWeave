@@ -168,9 +168,7 @@ def test_broken_checkpoint_chain_rejected_without_partial_writes(tmp_path: Path)
         dst.close()
 
 
-def test_cli_export_and_import_bundle(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_cli_export_and_import_bundle(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     src_db = tmp_path / "cli_src.db"
     src = SQLiteThreadStore(src_db)
     _seed_thread(src, "thr-cli")

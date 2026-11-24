@@ -48,9 +48,7 @@ def _record_digest(rec: ThreadRecord) -> str:
     return history_digest(system=rec.system, messages=rec.messages)
 
 
-def _turn_delta_messages(
-    ordered: list[ThreadRecord], turn_index: int
-) -> list[dict[str, Any]]:
+def _turn_delta_messages(ordered: list[ThreadRecord], turn_index: int) -> list[dict[str, Any]]:
     prev_len = 0 if turn_index == 0 else len(ordered[turn_index - 1].messages)
     return copy.deepcopy(ordered[turn_index].messages[prev_len:])
 
@@ -103,9 +101,7 @@ def _summarize_turn(ordered: list[ThreadRecord], turn_index: int) -> dict[str, A
     }
 
 
-def _common_prefix_length(
-    ordered_a: list[ThreadRecord], ordered_b: list[ThreadRecord]
-) -> int:
+def _common_prefix_length(ordered_a: list[ThreadRecord], ordered_b: list[ThreadRecord]) -> int:
     common = 0
     for rec_a, rec_b in zip(ordered_a, ordered_b, strict=False):
         if _record_digest(rec_a) == _record_digest(rec_b):
@@ -134,12 +130,10 @@ def diff_threads(store: Any, thread_a_id: str, thread_b_id: str) -> dict[str, An
     )
 
     only_in_a = [
-        _summarize_turn(ordered_a, idx)
-        for idx in range(common_prefix_turns, len(ordered_a))
+        _summarize_turn(ordered_a, idx) for idx in range(common_prefix_turns, len(ordered_a))
     ]
     only_in_b = [
-        _summarize_turn(ordered_b, idx)
-        for idx in range(common_prefix_turns, len(ordered_b))
+        _summarize_turn(ordered_b, idx) for idx in range(common_prefix_turns, len(ordered_b))
     ]
 
     intent_shifts: list[dict[str, Any]] = []

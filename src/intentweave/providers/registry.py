@@ -19,4 +19,3 @@ def get_provider(name: str | None = None, **kwargs: Any) -> MessageProvider:
             "or implement the adapter behind env flags."
         )
     raise ValueError(f"Unknown provider: {chosen}")
-

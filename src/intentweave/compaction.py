@@ -133,8 +133,4 @@ def select_post_checkpoint_messages(
 
     covered_message_count = len(ordered_records[ckpt.up_to_turn].messages)
     leaf_messages = list(ordered_records[-1].messages)
-    return [
-        (idx, msg)
-        for idx, msg in enumerate(leaf_messages)
-        if idx >= covered_message_count
-    ]
+    return [(idx, msg) for idx, msg in enumerate(leaf_messages) if idx >= covered_message_count]

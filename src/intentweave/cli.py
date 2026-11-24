@@ -36,9 +36,7 @@ class ThreadVerificationResult:
         }
 
 
-def verify_thread_records(
-    thread_id: str, records: list[ThreadRecord]
-) -> ThreadVerificationResult:
+def verify_thread_records(thread_id: str, records: list[ThreadRecord]) -> ThreadVerificationResult:
     """Verify the SHA-256 history digest chain across all turns of a thread."""
     if not records:
         return ThreadVerificationResult(
@@ -277,9 +275,7 @@ def _build_parser() -> argparse.ArgumentParser:
     imp_bundle_cmd.add_argument(
         "--db", required=True, help="Path to target SQLiteThreadStore database file."
     )
-    imp_bundle_cmd.add_argument(
-        "--manifest", required=True, help="Path to snapshot-manifest.json."
-    )
+    imp_bundle_cmd.add_argument("--manifest", required=True, help="Path to snapshot-manifest.json.")
     imp_bundle_cmd.add_argument(
         "--json",
         dest="as_json",

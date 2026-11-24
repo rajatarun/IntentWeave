@@ -4,4 +4,3 @@ from intentweave.providers.openai_compat import OpenAICompatProvider
 from intentweave.providers.registry import get_provider
 
 __all__ = ["MessageProvider", "MockProvider", "OpenAICompatProvider", "get_provider"]
-
