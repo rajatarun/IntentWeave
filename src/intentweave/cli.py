@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from intentweave.bundle import export_thread_bundle, import_thread_bundle
 from intentweave.errors import ThreadError
 from intentweave.fingerprint import history_digest
 from intentweave.merge import diff_threads
@@ -245,6 +246,46 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit machine-readable JSON output.",
     )
+
+    exp_bundle_cmd = sub.add_parser(
+        "export-bundle",
+        help="Export a verified portable node-snapshot-v1 thread bundle.",
+    )
+    exp_bundle_cmd.add_argument(
+        "--db", required=True, help="Path to SQLiteThreadStore database file."
+    )
+    exp_bundle_cmd.add_argument(
+        "--thread-id", required=True, help="Thread ID (or response ID) to export."
+    )
+    exp_bundle_cmd.add_argument(
+        "--out", required=True, help="Output directory for bundle and snapshot-manifest.json."
+    )
+    exp_bundle_cmd.add_argument(
+        "--node-id", default="local-node", help="Origin node identifier (default: local-node)."
+    )
+    exp_bundle_cmd.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Emit machine-readable JSON output.",
+    )
+
+    imp_bundle_cmd = sub.add_parser(
+        "import-bundle",
+        help="Verify and import a portable node-snapshot-v1 thread bundle into SQLite.",
+    )
+    imp_bundle_cmd.add_argument(
+        "--db", required=True, help="Path to target SQLiteThreadStore database file."
+    )
+    imp_bundle_cmd.add_argument(
+        "--manifest", required=True, help="Path to snapshot-manifest.json."
+    )
+    imp_bundle_cmd.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Emit machine-readable JSON output.",
+    )
     return parser
 
 
@@ -370,6 +411,57 @@ def main(argv: list[str] | None = None) -> int:
                 f"common_prefix={diff['common_prefix_turns']} "
                 f"only_in_a={len(diff['only_in_a'])} only_in_b={len(diff['only_in_b'])} "
                 f"intent_shifts={len(diff['intent_shifts'])}"
+            )
+        return 0
+
+    if args.command == "export-bundle":
+        path = Path(args.db)
+        if not path.exists():
+            print(f"Error: database file not found: {path}", file=sys.stderr)
+            return 1
+        store = SQLiteThreadStore(path)
+        try:
+            manifest = export_thread_bundle(
+                store,
+                args.thread_id,
+                args.out,
+                node_id=args.node_id,
+            )
+        except (ThreadError, ValueError, OSError) as exc:
+            msg = exc.message if isinstance(exc, ThreadError) else str(exc)
+            print(f"Error: {msg}", file=sys.stderr)
+            return 1
+        finally:
+            store.close()
+
+        if args.as_json:
+            print(json.dumps(manifest, indent=2))
+        else:
+            print(
+                f"EXPORTED: snapshot_id='{manifest['snapshot_id']}' "
+                f"node_id='{manifest['node_id']}' "
+                f"checksum={manifest['checksum_sha256'][:16]}..."
+            )
+        return 0
+
+    if args.command == "import-bundle":
+        store = SQLiteThreadStore(args.db)
+        try:
+            summary = import_thread_bundle(args.manifest, store)
+        except (ThreadError, ValueError, OSError) as exc:
+            msg = exc.message if isinstance(exc, ThreadError) else str(exc)
+            print(f"Error: {msg}", file=sys.stderr)
+            return 1
+        finally:
+            store.close()
+
+        if args.as_json:
+            print(json.dumps(summary, indent=2))
+        else:
+            print(
+                f"IMPORTED: thread='{summary['thread_id']}' "
+                f"turns={summary['turns_imported']} "
+                f"checkpoints={summary['checkpoints_imported']}"
             )
         return 0
 
